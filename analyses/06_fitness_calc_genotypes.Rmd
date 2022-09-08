@@ -1,0 +1,1292 @@
+---
+title: "Fitness of fast/slow developing genotypes"
+output: 
+  github_document:
+    toc: true
+    df_print: kable
+---
+
+I experimentally selected tapeworms (*S. solidus*) for faster and slower development in their intermediate host. Elsewhere, I fit bivariate models to estimate genetic correlations. Here, I use those models to estimate the fitness of fast and slow developing genotypes. These are the full-sib models, so we are estimating the average fitness of the fastest and slowest developing families, specifically the top and bottom 10%.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(MCMCglmm)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+options(stringsAsFactors = FALSE)
+theme_set(theme_bw())
+theme_update(panel.grid.minor = element_blank())
+```
+
+```{r}
+load("05quant_gen_multivariateTEST.RData")
+```
+
+I calculate fitness as the probability of survival times the expected egg production. The first element of survival is the probability to infect copepods, survive in them, and then infect a stickleback.
+
+# Probability of surviving until infecting fish
+
+## copepod infection rate
+
+```{r}
+# prob of infecting
+cg_cinf <- cinf_cerc$Sol[,"traitcop_inf"] # + cinf_cerc$Sol[,"traitcop_inf:cop_stage_checkingC2"]
+# effect of fast genotype
+fg_cinf <- qnorm(0.9)*
+  (2*cinf_cerc$VCV[,"traitcerc_bi:traitcop_inf.worm_full_sib_fam_id"])/sqrt(2*cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_cinf <- qnorm(0.1)*
+  (2*cinf_cerc$VCV[,"traitcerc_bi:traitcop_inf.worm_full_sib_fam_id"])/sqrt(2*cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+Here are the infection rates for fast, average, and slow families. 
+
+```{r}
+summary(pnorm(cg_cinf+fg_cinf))
+summary(pnorm(cg_cinf))
+summary(pnorm(cg_cinf+sg_cinf))
+```
+
+```{r}
+pred_cinf <- data.frame(
+  iter = as.character(rep(1:length(cg_cinf),3)),
+  cop_inf = pnorm(c(cg_cinf, cg_cinf+fg_cinf, cg_cinf+sg_cinf)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_cinf))
+)
+```
+
+## Copepod survival
+
+```{r}
+# prob of infecting
+cg_surv <- cerc_surv$Sol[,"traitcop_surv_13dpe"] #+ cerc_surv$Sol[,"traitcop_surv_13dpe:cop_stage_checkingC2"]
+# effect of fast genotype
+fg_surv <- qnorm(0.9)*
+  (2*cerc_surv$VCV[,"traitcerc_bi:traitcop_surv_13dpe.worm_full_sib_fam_id"])/sqrt(2*cerc_surv$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_surv <- qnorm(0.1)*
+  (2*cerc_surv$VCV[,"traitcerc_bi:traitcop_surv_13dpe.worm_full_sib_fam_id"])/sqrt(2*cerc_surv$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+Here are the copepod survival rates for fast, average, and slow families. 
+
+```{r}
+summary(pnorm(cg_surv+fg_surv))
+summary(pnorm(cg_surv))
+summary(pnorm(cg_surv+sg_surv))
+```
+
+```{r}
+pred_surv <- data.frame(
+  iter = as.character(rep(1:length(cg_surv),3)),
+  surv = pnorm(c(cg_surv, cg_surv+fg_surv, cg_surv+sg_surv)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_surv))
+)
+pred_surv <- pred_surv%>%
+  mutate(mort_rate = log(surv)/13)
+```
+
+Next we examine fish infection probability as a function of time in copepods.
+
+## Fish infection rate
+### Day 12
+
+The earliest time point is 12 dpi.
+
+```{r}
+# prob of infecting fish 12 dpi
+cg_finf12 <- cerc_finf$Sol[,"traitschisto_inf"] + cerc_finf$Sol[,"at.level(trait, 2):fish_exp_on_cop_dpe_fct12"]
+# effect of fast genotype
+fg_finf12 <- qnorm(0.9)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_finf12 <- qnorm(0.1)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+Here are the infection rates of fast, average, and slow genotypes. The difference is weaker than observed in the final generation of the experiment. Maybe that should not be too surprising, since there was little genetic variance for infection rates.
+
+```{r}
+summary(pnorm(cg_finf12+fg_finf12))
+summary(pnorm(cg_finf12))
+summary(pnorm(cg_finf12+sg_finf12))
+```
+
+### Day 14
+
+```{r}
+# prob of infecting fish 14 dpi
+cg_finf14 <- cerc_finf$Sol[,"traitschisto_inf"]
+# effect of fast genotype
+fg_finf14 <- qnorm(0.9)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_finf14 <- qnorm(0.1)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+At 14 dpi, the differences are a bit bigger.
+
+```{r}
+summary(pnorm(cg_finf14+fg_finf14))
+summary(pnorm(cg_finf14))
+summary(pnorm(cg_finf14+sg_finf14))
+```
+
+```{r}
+# # worms that developed much faster than expected - how much does the residual correlation affect infectivity compared to the genetic correlation
+# # prob of infecting fish 12 dpi
+# cg_finf14r <- cerc_finf$Sol[,"traitschisto_inf"] 
+# # effect of fast genotype
+# fg_finf14r <- qnorm(0.9)*
+#   (cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.units"])/sqrt(cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.units"])
+# # effect of slow genotype
+# sg_finf14r <- qnorm(0.1)*
+#   (cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.units"])/sqrt(cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.units"])
+# summary(pnorm(cg_finf14r+fg_finf14r))
+# summary(pnorm(cg_finf14r))
+# summary(pnorm(cg_finf14r+sg_finf14r))
+```
+```{r}
+# summary(pnorm(cg_finf14+fg_finf14) - pnorm(cg_finf14))
+```
+```{r}
+# summary(pnorm(cg_finf14r+fg_finf14r) - pnorm(cg_finf14r))
+```
+
+### Day 16
+
+```{r}
+# prob of infecting fish 16 dpi
+cg_finf16 <- cerc_finf$Sol[,"traitschisto_inf"] + cerc_finf$Sol[,"at.level(trait, 2):fish_exp_on_cop_dpe_fct16"]
+# effect of fast genotype
+fg_finf16 <- qnorm(0.9)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_finf16 <- qnorm(0.1)*
+  (2*cerc_finf$VCV[,"traitcerc_bi:traitschisto_inf.worm_full_sib_fam_id"])/sqrt(2*cerc_finf$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+The differences at 16 dpi are similar. 
+
+```{r}
+summary(pnorm(cg_finf16+fg_finf16))
+summary(pnorm(cg_finf16))
+summary(pnorm(cg_finf16+sg_finf16))
+```
+Note that we did not fit a model with a genotype by environment interaction (i.e. the model did not test whether genotypes differ more at 12 dpi than 16 dpi). Let's fit that model.
+
+```{r}
+# thin_finf <- 75
+# burnin_finf <- 1000
+# nit_finf <- thin_finf * 500 + burnin_finf
+# 
+# m2_finf_fam_GxE <- 
+#   MCMCglmm(schisto_inf ~ ib + fish_initial_bm_cen + fish_sex_cen + fish_exp_on_cop_dpe_fct,  
+#            random = ~ cop_block + idh(fish_exp_on_cop_dpe_fct):worm_full_sib_fam_id,
+#            family = "threshold",
+#            data = dat_finf,
+#            prior = 
+#              list(R = list(V = 1, fix = 1),
+#                   G = list(G1 = list(V = 1, nu = 1000, alpha.mu = 0, alpha.V = 1),
+#                            G2 = list(V = diag(3), nu = 3, alpha.mu = c(0,0,0), alpha.V = diag(3)))),
+#            verbose=F,
+#            nitt = nit_finf, 
+#            thin = thin_finf,
+#            burnin = burnin_finf
+#            )
+```
+
+Here it is. The variance among families decreases from 12 to 16 dpi, which fits the differences we saw among lines in the final generation. However, the confidence intervals are wide, which makes sense, given that relatively few fish were exposed per family per time point.
+
+```{r}
+# summary(m2_finf_fam_GxE)
+```
+
+We can clearly see that when looking at the posterior trace.
+
+```{r}
+# plot(mcmc.list(
+#   m2_finf_fam_GxE$VCV[,"fish_exp_on_cop_dpe_fct12.worm_full_sib_fam_id"],
+#   m2_finf_fam_GxE$VCV[,"fish_exp_on_cop_dpe_fct14.worm_full_sib_fam_id"],
+#   m2_finf_fam_GxE$VCV[,"fish_exp_on_cop_dpe_fct16.worm_full_sib_fam_id"]
+#   ), density = F
+#   )
+```
+
+So, estimating different genetic co(variances) at each infection time point is probably beyond the capability of the data, especially since differences between families were small.
+
+With the predicted fish infection rates at these three time points, I fit asymptotic curves. 
+
+```{r}
+pred_finf12 <- data.frame(
+  fish_exp_on_cop_dpe = 12,
+  iter = as.character(rep(1:length(cg_finf12),3)),
+  fish_inf = pnorm(c(cg_finf12, cg_finf12+fg_finf12, cg_finf12+sg_finf12)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_finf12))
+)
+pred_finf14 <- data.frame(
+  fish_exp_on_cop_dpe = 14,
+  iter = as.character(rep(1:length(cg_finf14),3)),
+  fish_inf = pnorm(c(cg_finf14, cg_finf14+fg_finf14, cg_finf14+sg_finf14)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_finf14))
+)
+pred_finf16 <- data.frame(
+  fish_exp_on_cop_dpe = 16,
+  iter = as.character(rep(1:length(cg_finf16),3)),
+  fish_inf = pnorm(c(cg_finf16, cg_finf16+fg_finf16, cg_finf16+sg_finf16)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_finf16))
+)
+pred_finf <- bind_rows(pred_finf12, pred_finf14, pred_finf16)
+```
+
+The first step is to find reasonable minimum values for development (the x-intercept).
+
+```{r}
+pred_finf_find_inittmin <- pred_finf%>%
+  group_by(iter)%>%
+  mutate(asy_d16 = max(fish_inf))%>%
+  nest()
+```
+```{r}
+init_tmin_est <- function(dy){
+  asy_y <- dy$asy_d16
+  fi_all <- nls(fish_inf ~ asy_y * (1 - exp(-c_rate*(fish_exp_on_cop_dpe - tmin)) ),
+                start = list(c_rate = 0.5, tmin = 10),
+                control = nls.control(maxiter = 1000, tol = 8e-3),
+                data = dy,
+                trace = F)
+  tmin <- coef(fi_all)["tmin"]
+  return(tmin)
+}
+
+
+pred_finf_find_inittmin <- pred_finf_find_inittmin%>%
+  mutate(init_tmin = map_dbl(data, init_tmin_est))
+```
+
+We use the initial estimates for minimum devo time to then estimate the rate of increase to the asymptote.
+
+```{r}
+# add initial tmin estimate to posterior dist
+pred_finf_find_c <- pred_finf%>%
+  left_join(., pred_finf_find_inittmin%>%select(iter, init_tmin))%>%
+  group_by(iter, grp)%>%
+  mutate(asy_d = max(fish_inf))%>%
+  nest()
+```
+```{r}
+# use initial tmin to estimate c, the rate of approach to asymptote
+c_rate_est <- function(dy){
+  fi_c <- nls(fish_inf ~ asy_d * (1 - exp(-c_rate*(fish_exp_on_cop_dpe - init_tmin)) ),
+          start = list(c_rate = 0.5),
+          control = nls.control(maxiter = 1000),
+          data = dy,
+          trace = F)
+  c_rate <- coef(fi_c)["c_rate"]
+  return(c_rate)
+}
+
+pred_finf_find_c <- pred_finf_find_c%>%
+  mutate(c_rate = map_dbl(data, c_rate_est))
+
+# unnest and renest data, so that c_rate is in 'data' list col
+pred_finf_find_c <- pred_finf_find_c%>%
+  unnest()%>%
+  nest()
+```
+
+Finally, we re-estimate the minimum separately for the different selection lines. We fit the curve to all the posterior samples so that we can estimate SEs around the parameter estimates.
+
+```{r}
+# use c_rate to reestimate the minimum separately for different selection lines
+tmin_est <- function(dy){
+  fi_c <- nls(fish_inf ~ asy_d * (1 - exp(-c_rate*(fish_exp_on_cop_dpe - tmin2)) ),
+          start = list(tmin2 = dy$init_tmin[1]),
+          control = nls.control(maxiter = 1000),
+          data = dy,
+          trace = F)
+  tmin2 <- coef(fi_c)["tmin2"]
+  return(tmin2)
+}
+
+pred_finf_find_c <- pred_finf_find_c%>%
+  mutate(tmin2 = map_dbl(data, tmin_est))
+```
+```{r}
+# unnest data frame - now for each posterior draw, we have estimated time to infectivity, asymptote, and slope to asymptote for each selection line
+pred_finf_find_c <- pred_finf_find_c%>%
+  unnest()%>%
+  ungroup()%>%
+  select(grp, iter, asy_d, c_rate, tmin2)%>%distinct()
+```
+
+## Fitness in copepods 
+
+Now we have estimates of the probability of infecting copepods, their survival over time, and the probability of infecting fish over time. Let's look at these estimates.
+
+```{r}
+# make data frame with means/model params and time in copepods
+day_cop <- seq(0, 25, by = 0.2) # days in copepod
+fitness_cop <- data.frame(days_cop = rep(day_cop, 3),
+                          grp = rep(c("control", "fast", "slow"), each = length(day_cop))
+)
+
+fitness_cop <- left_join(pred_cinf, fitness_cop)%>%
+  left_join(., pred_surv, by=c("iter", "grp"))%>%
+  left_join(., pred_finf_find_c, by=c("iter", "grp"))
+```
+```{r}
+# make composite vars
+fitness_cop <- fitness_cop%>%
+  mutate(cop_surv = exp(mort_rate * days_cop),
+         fish_infectivity = if_else(days_cop < tmin2, 
+                                    0,
+                                    asy_d * (1 - exp(-c_rate*(days_cop - tmin2))))
+         )%>%
+  mutate(prob_survival_to_time_point = cop_inf * cop_surv,
+         prob_to_inf_fish = cop_inf * cop_surv * fish_infectivity)
+```
+
+
+```{r}
+# for each variable, take median, upper and lower CI at each day
+med_upr_lwr <- list(
+  fit = ~median(.x, na.rm = TRUE),
+  lwr = ~quantile(.x, probs = 0.025, na.rm=T),
+  upr = ~quantile(.x, probs = 0.975, na.rm=T)
+)
+
+fitness_cop_avg <- fitness_cop%>%
+  group_by(grp, days_cop)%>%
+  summarise(across( 
+    c(cop_inf, mort_rate, asy_d, c_rate, tmin2, 
+      cop_surv, prob_survival_to_time_point,
+      fish_infectivity, prob_to_inf_fish),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_cop_avg <- fitness_cop_avg%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+
+Here is the predicted survival in copepods. The solid line is the best estimate, the dashed and dotted lines are the upper and lower 95% CIs, respectively. Copepod survival did not differ among lines.
+
+```{r}
+ggplot(fitness_cop_avg, 
+       aes(x = days_cop,
+           y = fit.cop_surv,
+           color = grp)) +
+  geom_line(aes(y = lwr.cop_surv), linetype = "dotted") +
+  geom_line(aes(y = upr.cop_surv), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  labs(x = "Days in copepod",
+       y = "Survival probability")
+```
+
+We can also take into account the fact that not every coracidia will infect a copepod. Here is the probability that parasites first infect and then survive in copepods.
+
+```{r}
+f_sya <- ggplot(fitness_cop_avg, 
+       aes(x = days_cop,
+           y = fit.prob_survival_to_time_point,
+           color = grp)) +
+  geom_line(aes(y = lwr.prob_survival_to_time_point), linetype = "dotted") +
+  geom_line(aes(y = upr.prob_survival_to_time_point), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  labs(x = "Days in copepod",
+       y = "Survival probability") 
+f_sya
+```
+
+Here are the asymptotic curves fit to the fish infection rates in the final generation. Fast families had higher infectivity, but there are wide CIs around these trends.
+
+```{r}
+f_syb <- ggplot(fitness_cop_avg, 
+       aes(x = days_cop,
+           y = fit.fish_infectivity,
+           color = grp)) +
+  geom_line(aes(y = lwr.fish_infectivity), linetype = "dotted") +
+  geom_line(aes(y = upr.fish_infectivity), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_x_continuous(limits = c(9,20)) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  labs(x = "Days in copepod",
+       y = "Infection rate in fish")
+f_syb
+```
+
+We can multiply survival probability by fish infectivity to obtain the probability that a parasite will successfully infect fish (assuming a constant consumption rate by fish). The probability increases before slowing decreasing as copepods die off.
+
+```{r}
+f_syc <- ggplot(fitness_cop_avg, 
+       aes(x = days_cop,
+           y = fit.prob_to_inf_fish,
+           color = grp)) +
+  geom_line(aes(y = lwr.prob_to_inf_fish), linetype = "dotted") +
+  geom_line(aes(y = upr.prob_to_inf_fish), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9,25)) +
+  labs(x = "Days in copepod",
+       y = "Probability to infect fish") 
+f_syc
+```
+
+Here is the difference in infection probability between fast and slow families 16 dpi:
+
+```{r}
+fitness_cop_avg%>%
+  filter(days_cop == 16, grp == "fast")%>%.$fit.prob_to_inf_fish - 
+  fitness_cop_avg%>%
+  filter(days_cop == 16, grp == "slow")%>%.$fit.prob_to_inf_fish
+```
+
+After infecting a fish, the fish must survive, allowing the parasite to grow to a large fecund size.
+
+# Probability of surviving to reproduce in birds
+
+## Fish survival
+```{r}
+summary(cerc_fsurv)
+```
+
+```{r}
+# prob of infecting
+cg_fsurv <- cerc_fsurv$Sol[,"traitfish_surv75"]
+# effect of fast genotype
+fg_fsurv <- qnorm(0.9)*
+  cerc_fsurv$VCV[,"traitcerc_bi:traitfish_surv75.worm_full_sib_fam_id"]/sqrt(cerc_fsurv$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+# effect of slow genotype
+sg_fsurv <- qnorm(0.1)*
+  cerc_fsurv$VCV[,"traitcerc_bi:traitfish_surv75.worm_full_sib_fam_id"]/sqrt(cerc_fsurv$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+```
+
+Here is the probability that fish survived until dissection. Fast development was associated with lower fish survival.
+
+```{r}
+summary(pnorm(cg_fsurv+fg_fsurv))
+summary(pnorm(cg_fsurv))
+summary(pnorm(cg_fsurv+sg_fsurv))
+```
+```{r}
+pred_fsurv <- data.frame(
+  iter = as.character(rep(1:length(cg_fsurv),3)),
+  fsurv = pnorm(c(cg_fsurv, cg_fsurv+fg_fsurv, cg_fsurv+sg_fsurv)),
+  grp = rep(c("control", "fast", "slow"), each = length(cg_fsurv))
+)
+pred_fsurv <- pred_fsurv%>%
+  mutate(mort_rate = log(fsurv)/74)
+```
+
+# Plerocercoid size
+
+Since we want to know how fitness changes as parasites grow in fish, we need to extract the growth curve from the plerocercoid model.
+
+```{r}
+# these are model parameters needed to calculate growth curves
+px <- cbind(
+  cerc_pler$Sol[,c("traitlog_ww_scl", "at.level(trait, \"log_ww_scl\"):age_diss_cen")],
+  cerc_pler$VCV[,c("traitcerc_bi:traitlog_ww_scl.worm_full_sib_fam_id",
+                   "traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id")]
+)
+colnames(px) <- c("pler_int", "age_diss_cen", "cov_cerc_pler", "var_cerc_pler")
+pred_plerx <- data.frame(px)
+
+pred_plerx <- mutate(pred_plerx, iter = as.character(1:nrow(px)))
+```
+
+# Fecundity
+
+We then take fecundity as a function of the plerocercoid size.
+
+```{r}
+# these are model parameters needed to calculate growth curves
+px <- cbind(
+  cerc_eggs_ww$Sol[,c("traiteggs_scl", "at.level(trait, \"eggs_scl\"):log_ww_cen")],
+  cerc_eggs_ww$VCV[,c("traitcerc_bi:traiteggs_scl.worm_full_sib_fam_id",
+                      "traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id")]
+)
+colnames(px) <- c("egg_int", "log_ww_cen", "cov_cerc_fec", "var_cerc_fec")
+pred_eggsx <- data.frame(px)
+
+pred_eggsx <- mutate(pred_eggsx, iter = as.character(1:nrow(px)))
+```
+
+## Fitness in sticklebacks
+
+With these two functions (plerocercoid mass vs time and fecundity vs plerocercoid mass), we can calculate the expected egg production after different amounts of time in sticklebacks. Specifically, egg production is fish survival x the probability to infect a bird (assumed to be zero below 50 mg and 70% above that threshold) x eggs for a worm that size.
+
+```{r}
+# incorporate days post infection into dataset
+day_fish <- seq(0, 90, by = 0.5)
+fitness_fish <- data.frame(days_fish = rep(day_fish, 3),
+                          grp = rep(c("control", "fast", "slow"), each = length(day_fish))
+)
+
+fitness_fish <- left_join(pred_fsurv, fitness_fish)
+```
+```{r}
+fitness_fish <- left_join(fitness_fish, pred_plerx, by = "iter")%>%
+  left_join(., pred_eggsx, by = "iter")%>%
+  mutate(fish_surv = exp(mort_rate * days_fish),
+         pler_size_scl = case_when(
+           grp == "control" ~ 
+             (pler_int + age_diss_cen * (days_fish - med_age_diss) ),
+           grp == "fast" ~ 
+             (pler_int + age_diss_cen * (days_fish - med_age_diss) +
+                   qnorm(0.9)*cov_cerc_pler/sqrt(var_cerc_pler)),
+           grp == "slow" ~ 
+             (pler_int + age_diss_cen * (days_fish - med_age_diss) + 
+                   qnorm(0.1)*cov_cerc_pler/sqrt(var_cerc_pler))
+           ))%>%
+  mutate(pler_size = exp(
+    pler_size_scl * sd(dat_multi$log_ww, na.rm = T) + mean(dat_multi$log_ww, na.rm = T)
+    ))%>%
+  mutate(eggs_scl = case_when(
+           grp == "control" ~ 
+             exp(egg_int + log_ww_cen * (log(pler_size) - log(mean(dat_bred$worm_bm_mg, na.rm = T)))),
+           grp == "fast" ~ 
+             exp(egg_int + log_ww_cen * (log(pler_size) - log(mean(dat_bred$worm_bm_mg, na.rm = T))) +
+                   qnorm(0.9)*cov_cerc_fec/sqrt(var_cerc_fec)),
+           grp == "slow" ~ 
+             exp(egg_int + log_ww_cen * (log(pler_size) - log(mean(dat_bred$worm_bm_mg, na.rm = T))) +
+                   qnorm(0.1)*cov_cerc_fec/sqrt(var_cerc_fec))
+           ),
+         bird_inf_rate = if_else(pler_size < 50, 0, 0.7) # zero infectivity prior to 50 mg
+         )%>%
+  mutate(eggs = exp(
+    eggs_scl * sd(dat_multi$log_eggs, na.rm = T) + mean(dat_multi$log_eggs, na.rm = T)
+    ))%>%
+  mutate(expected_eggs = fish_surv * bird_inf_rate * eggs,
+         expected_eggs_no_surv_diff = bird_inf_rate * eggs,
+         relative_eggs = 0,
+         relative_eggs_no_surv_diff = 0,
+         relative_fitness = 1)
+```
+```{r}
+fitness_fish$relative_eggs[which(fitness_fish$grp == "fast")] <- 
+  fitness_fish%>%
+  filter(grp=="fast")%>%.$expected_eggs -
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs
+
+fitness_fish$relative_eggs[which(fitness_fish$grp == "slow")] <- 
+  fitness_fish%>%
+  filter(grp=="slow")%>%.$expected_eggs -
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs
+  
+fitness_fish$relative_eggs_no_surv_diff[which(fitness_fish$grp == "fast")] <- 
+  fitness_fish%>%
+  filter(grp=="fast")%>%.$expected_eggs_no_surv_diff -
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs_no_surv_diff
+
+fitness_fish$relative_eggs_no_surv_diff[which(fitness_fish$grp == "slow")] <- 
+  fitness_fish%>%
+  filter(grp=="slow")%>%.$expected_eggs_no_surv_diff -
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs_no_surv_diff
+
+fitness_fish$relative_fitness[which(fitness_fish$grp == "fast")] <- 
+  fitness_fish%>%
+  filter(grp=="fast")%>%.$expected_eggs /
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs
+
+fitness_fish$relative_fitness[which(fitness_fish$grp == "slow")] <- 
+  fitness_fish%>%
+  filter(grp=="slow")%>%.$expected_eggs /
+  fitness_fish%>%
+  filter(grp=="control")%>%.$expected_eggs
+```
+
+```{r}
+# for each variable, take median, upper and lower CI at each day
+fitness_fish_avg <- fitness_fish%>%
+  group_by(grp, days_fish)%>%
+  summarise(across( 
+    c(fish_surv, pler_size, eggs, bird_inf_rate, 
+      expected_eggs, expected_eggs_no_surv_diff, 
+      relative_eggs, relative_eggs_no_surv_diff, relative_fitness),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_fish_avg <- fitness_fish_avg%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+
+Here is the predicted survival of fish. Fast-families may pay a price in fish.
+
+```{r}
+f_syd <- ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.fish_surv,
+           color = grp)) +
+  geom_line(aes(y = lwr.fish_surv), linetype = "dotted") +
+  geom_line(aes(y = upr.fish_surv), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  labs(x = "Days in fish",
+       y = "Survival probability")
+f_syd
+```
+
+Here is the estimated parasite growth in fish; it is similar among groups. The horizontal line represents the estimated threshold size needed to infect birds (50 mg). This threshold is crossed in just under 50 days, which fits other experiments well. Note that, with long observations, we would need to fit a growth curve that levels off, i.e. mass does not keep accumulating exponentially.
+
+```{r}
+f_sye <- ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.pler_size,
+           color = grp)) +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  geom_line(aes(y = lwr.pler_size), linetype = "dotted") +
+  geom_line(aes(y = upr.pler_size), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  labs(x = "Days in fish",
+       y = "Plerocercoid mass (mg)")
+f_sye
+```
+
+The increase in fecundity follows basically the same trajectory, though it is a bit steeper, since fecundity increase with body size more than proportionally. Faster development was associated with more eggs.
+
+```{r}
+ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.eggs,
+           color = grp)) +
+  geom_line(aes(y = lwr.eggs), linetype = "dotted") +
+  geom_line(aes(y = upr.eggs), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  coord_cartesian(xlim = c(30, 90)) +
+  labs(x = "Days in fish",
+       y = "Eggs")
+```
+
+However, only worms that survive transmission to birds will produce eggs. When we include this, as well as fish survival, then there is a threshold pattern; below 50 mg worms die upon tranmission to birds, but above 50 mg, then produce eggs relative to their body size. The difference in fish survival eliminates the difference among genotypes.
+
+```{r}
+f_syf <- ggplot(fitness_fish_avg,
+       aes(x = days_fish,
+           y = fit.expected_eggs/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  coord_cartesian(xlim = c(30, 90)) +
+  labs(x = "Days in fish",
+       y = "Eggs (thousands)")
+f_syf
+```
+Even if we assume that genotypes affect fish survival similarly, there is not a big difference in egg production.
+
+```{r}
+ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.expected_eggs_no_surv_diff,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs_no_surv_diff), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs_no_surv_diff), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  coord_cartesian(xlim = c(30, 90)) +
+  labs(x = "Days in fish",
+       y = "Eggs")
+```
+
+Maybe the difference are easier to see on a relative scale. Here is egg production above and below expectations. The fecundity advantage of fast-developers is more pronounced when they are large.
+
+```{r}
+ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.relative_eggs/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_eggs/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_eggs/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  coord_cartesian(xlim = c(40, 90)) +
+  labs(x = "Days in fish",
+       y = "Eggs(thousands)\nRelative to average genotype")
+```
+
+Finally, we can look at relative fitness (eggs/avg eggs), focusing on the part of the plot where fitness is non-zero. There is little difference among genotypes. Essentially, the benefits to fecundity from fast development are completely eliminated by the reduction in fish survival.
+
+```{r}
+ggplot(fitness_fish_avg, 
+       aes(x = days_fish,
+           y = fit.relative_fitness,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_fitness), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_fitness), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  coord_cartesian(xlim = c(55, 90)) +
+  labs(x = "Days in fish",
+       y = "Eggs, relative to average genotype")
+```
+
+```{r}
+f_sy <- cowplot::plot_grid(
+  f_sya + guides(color="none"),
+  f_syb + guides(color="none"),
+  f_syc + guides(color="none"),
+  f_syd + guides(color="none"),
+  f_sye + 
+    theme(legend.title = element_blank(),
+          legend.background = element_rect(color = "black"),
+          legend.position = c(0.025, 0.975),
+          legend.justification = c(0, 1)),
+  f_syf + guides(color="none"),
+  nrow = 2,
+  align = "hv",
+  labels = "AUTO")
+ggsave(f_sy, filename = "../figs/figSX_fitness_components_genotypes.png", width = 75*3, height = 75*2, units = "mm")
+```
+
+
+# Fitness over the full cycle
+
+Now, let's combine the calculations from the two hosts. Fitness is a function of time spent in both hosts (i.e. time in copepods determines infectivity, whereas time in fish determines fecundity). Therefore, we can make a contour plot with fitness on the z-axis as a function of time in the two hosts.
+
+```{r}
+fitness_all <- left_join(ungroup(fitness_cop_avg)%>%
+                           select(grp, days_cop, fit.prob_to_inf_fish),
+                         ungroup(fitness_fish_avg)%>%
+                           select(grp, days_fish, fit.expected_eggs),
+                         by = c("grp"))
+
+fitness_all <- fitness_all%>%
+  mutate(expected_eggs_dX = fit.prob_to_inf_fish * fit.expected_eggs,
+         relative_fitness = 1)
+
+fitness_all$relative_fitness[which(fitness_all$grp == "fast")] <- 
+  fitness_all%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX /
+  fitness_all%>%
+  filter(grp=="control")%>%.$expected_eggs_dX
+
+fitness_all$relative_fitness[which(fitness_all$grp == "slow")] <- 
+  fitness_all%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX /
+  fitness_all%>%
+  filter(grp=="control")%>%.$expected_eggs_dX
+```
+
+Fitness (removing non-zero values) tends to be highest when spending little time in copepods and more time in fish. And it seems to be highest in fast-developing genotypes.
+
+```{r}
+ggplot(fitness_all%>%filter(expected_eggs_dX>0),
+       aes(x=days_cop, y=days_fish, z=expected_eggs_dX)) +
+  geom_contour_filled() +
+  facet_wrap(~grp) +
+  scale_fill_brewer(palette = "RdBu", direction = -1) +
+  labs(x = "days in copepods", y = "days in sticklebacks", fill = "eggs")
+```
+The maximum fitness tends to be around 16 days in copepods and longer in fish (i.e. fecundity increases faster than fish mortality).
+
+```{r}
+fitness_all%>%
+  filter(grp == "fast")%>%
+  arrange(desc(expected_eggs_dX))%>%
+  slice_head(n=5)
+```
+
+Absolute fitness impacts population growth but understanding genotype spread can be better evaluated with relative fitness. Here is the relative fitness of parasites in the fast and slow lines. Relative fitness is maximized at earlier transmission times. Still, over large parts of the parameter space, there is not a big advantage to fast development.
+
+```{r}
+ggplot(fitness_all%>%filter(grp != "control", expected_eggs_dX > 0),
+       aes(x=days_cop, y=days_fish, z=relative_fitness)) +
+  geom_contour_filled() +
+  facet_wrap(~grp) +
+  scale_fill_brewer(palette = "RdBu", direction = -1) +
+  scale_y_log10() + scale_x_log10() +
+  labs(x = "days in copepods", y = "days in sticklebacks", fill = "Rel. fitness")
+```
+
+Now we combine the estimates from copepods and from fish to look at the expected egg production, given different amounts of time in either host. We can start by looking at expected egg production as a function of time in copepods, given the same amount of time in fish (90 dpi).
+
+```{r}
+fitness_cop2 <- left_join(ungroup(fitness_cop), 
+                         fitness_fish%>%
+                           filter(days_fish == 90)%>%
+                           select(iter, grp, expected_eggs),
+                         by = c("grp", "iter")
+                         )
+fitness_cop2 <- fitness_cop2%>%
+  mutate(expected_eggs_dX = prob_to_inf_fish * expected_eggs,
+         relative_eggs_dx = 0,
+         relative_fitness = 1)
+mx <- fitness_cop2%>%filter(expected_eggs_dX>0)%>%.$expected_eggs_dX%>%min()
+
+fitness_cop2$relative_eggs_dx[which(fitness_cop2$grp == "fast")] <- 
+  fitness_cop2%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX -
+  fitness_cop2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX
+
+fitness_cop2$relative_eggs_dx[which(fitness_cop2$grp == "slow")] <- 
+  fitness_cop2%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX -
+  fitness_cop2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX
+
+fitness_cop2$relative_fitness[which(fitness_cop2$grp == "fast")] <- 
+  (fitness_cop2%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX+mx) /
+  (fitness_cop2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+fitness_cop2$relative_fitness[which(fitness_cop2$grp == "slow")] <- 
+  (fitness_cop2%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX+mx) /
+  (fitness_cop2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+```
+
+```{r}
+# for each variable, take median, upper and lower CI at each day
+fitness_cop_avg2 <- fitness_cop2%>%
+  group_by(grp, days_cop)%>%
+  summarise(across( 
+    c(cop_inf, prob_survival_to_time_point,
+      fish_infectivity, prob_to_inf_fish,
+      expected_eggs_dX, relative_eggs_dx, relative_fitness),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_cop_avg2 <- fitness_cop_avg2%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+The fast developers have higher fitness.
+
+```{r}
+f_sza <- ggplot(fitness_cop_avg2, 
+       aes(x = days_cop,
+           y = fit.expected_eggs_dX/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs_dX/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs_dX/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9, 20)) +
+  labs(x = "Days in copepods",
+       y = "Eggs (thousands)\nreproduction 90 dpi in fish") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1))
+f_sza
+```
+
+Here is the same plot with relative eggs shown.
+
+```{r}
+ggplot(fitness_cop_avg2, 
+       aes(x = days_cop,
+           y = fit.relative_eggs_dx/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_eggs_dx/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_eggs_dx/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9, 20)) +
+  labs(x = "Days in copepods",
+       y = "Relative eggs (thousands)\nreproduction 90 dpi in fish") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1))
+```
+
+Finally, here is relative fitness.
+
+```{r}
+f_szb <- ggplot(fitness_cop_avg2, 
+       aes(x = days_cop,
+           y = fit.relative_fitness,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_fitness), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_fitness), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9, 20)) +
+  scale_y_log10() +
+  labs(x = "Days in copepods",
+       y = "Relative fitness\nreproduction 90 dpi in fish") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1)) +
+  coord_cartesian(ylim = c(0.2, 5))
+f_szb
+```
+
+Here is the relative advantage (%) of the fast group in the above plot.
+
+```{r}
+fitness_cop_avg2%>%
+  filter(fit.relative_fitness != 1, grp == "fast")%>%
+  mutate(rf = fit.relative_fitness-1)%>%
+  .$rf%>%
+  summary()
+```
+Here is the relative disadvantage (%) of the slow group in the above plot.
+
+```{r}
+fitness_cop_avg2%>%
+  filter(fit.relative_fitness != 1, grp == "slow")%>%
+  mutate(rf = 1-fit.relative_fitness)%>%
+  .$rf%>%
+  summary()
+```
+
+Now, let's make the same two plots, but assume that fish experience higher bird predation, i.e. transmission to birds occurs earlier at 60 dpi.
+
+```{r}
+fitness_cop3 <- left_join(ungroup(fitness_cop), 
+                         fitness_fish%>%
+                           filter(days_fish == 60)%>%
+                           select(iter, grp, expected_eggs),
+                         by = c("grp", "iter")
+                         )
+
+fitness_cop3 <- fitness_cop3%>%
+  mutate(expected_eggs_dX = prob_to_inf_fish * expected_eggs,
+         relative_fitness = 1)
+mx <- fitness_cop3%>%filter(expected_eggs_dX>0)%>%.$expected_eggs_dX%>%min()
+
+fitness_cop3$relative_fitness[which(fitness_cop3$grp == "fast")] <- 
+  (fitness_cop3%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX+mx) /
+  (fitness_cop3%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+fitness_cop3$relative_fitness[which(fitness_cop3$grp == "slow")] <- 
+  (fitness_cop3%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX+mx) /
+  (fitness_cop3%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+# for each variable, take median, upper and lower CI at each day
+fitness_cop_avg3 <- fitness_cop3%>%
+  group_by(grp, days_cop)%>%
+  summarise(across( 
+    c(cop_inf, prob_survival_to_time_point,
+      fish_infectivity, prob_to_inf_fish, expected_eggs_dX, relative_fitness),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_cop_avg3 <- fitness_cop_avg3%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+
+The pattern is similar, though overall egg production is lower.
+
+```{r}
+f_szc <- ggplot(fitness_cop_avg3, 
+       aes(x = days_cop,
+           y = fit.expected_eggs_dX/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs_dX/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs_dX/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9, 20)) +
+  labs(x = "Days in copepods",
+       y = "Eggs (thousands)\nreproduction 60 dpi in fish") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1))
+f_szc
+```
+
+The pattern in relative fitness is also about the same. 
+
+```{r}
+f_szd <- ggplot(fitness_cop_avg3, 
+       aes(x = days_cop,
+           y = fit.relative_fitness,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_fitness), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_fitness), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(9, 20)) +
+  scale_y_log10() +
+  labs(x = "Days in copepods",
+       y = "Relative fitness\nreproduction 60 dpi in fish") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1)) +
+  coord_cartesian(ylim = c(0.2, 5))
+f_szd
+```
+
+Here is the relative advantage (%) of the fast grp in the above plot.
+
+```{r}
+fitness_cop_avg3%>%
+  filter(fit.relative_fitness != 1, grp == "fast")%>%
+  mutate(rf = fit.relative_fitness-1)%>%
+  .$rf%>%
+  summary()
+```
+Here is the relative disadvantage (%) of the slow grp in the above plot.
+
+```{r}
+fitness_cop_avg3%>%
+  filter(fit.relative_fitness != 1, grp == "slow")%>%
+  mutate(rf = 1-fit.relative_fitness)%>%
+  .$rf%>%
+  summary()
+```
+
+Now, we focus on the other host. Let's compare the lines when transmitted to fish at 12 dpi in copepods. This early transmission time is when the differences between lines should be largest.
+
+```{r}
+fitness_fish2 <- left_join(ungroup(fitness_fish), 
+                         fitness_cop%>%
+                           ungroup()%>%
+                           filter(days_cop == 12)%>%
+                           select(iter, grp, prob_to_inf_fish),
+                         by = c("grp", "iter")
+                         )
+
+fitness_fish2 <- fitness_fish2%>%
+  mutate(expected_eggs_dX = prob_to_inf_fish * expected_eggs,
+         relative_fitness = 1)
+mx <- fitness_fish2%>%filter(expected_eggs_dX>0)%>%.$expected_eggs_dX%>%min()
+
+fitness_fish2$relative_fitness[which(fitness_fish2$grp == "fast")] <- 
+  (fitness_fish2%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX+mx) /
+  (fitness_fish2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+fitness_fish2$relative_fitness[which(fitness_fish2$grp == "slow")] <- 
+  (fitness_fish2%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX+mx) /
+  (fitness_fish2%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+# for each variable, take median, upper and lower CI at each day
+fitness_fish_avg2 <- fitness_fish2%>%
+  group_by(grp, days_fish)%>%
+  summarise(across( 
+    c(fish_surv, pler_size, eggs, bird_inf_rate, expected_eggs_dX, relative_fitness),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_fish_avg2 <- fitness_fish_avg2%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+
+Indeed, the fast line has the highest fecundity here, but only slightly higher than the controls. The slow line, though, has much lower fecundity.
+
+```{r}
+f_szza <- ggplot(fitness_fish_avg2, 
+       aes(x = days_fish,
+           y = fit.expected_eggs_dX/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs_dX/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs_dX/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(35, 90)) +
+  labs(x = "Days in sticklebacks",
+       y = "Eggs (thousands)\ntransmitted from copepods 12 dpi") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1))
+f_szza
+```
+
+The plot of relative fitness also shows that the difference among groups is largest early on, because there is a big difference between some reproduction and no reproduction.
+
+```{r}
+f_szzb <- ggplot(fitness_fish_avg2, 
+       aes(x = days_fish,
+           y = fit.relative_fitness,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_fitness), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_fitness), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(35, 90)) +
+  scale_y_log10() +
+  labs(x = "Days in sticklebacks",
+       y = "Relative fitness\ntransmitted from copepods 12 dpi") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1)) +
+  coord_cartesian(ylim = c(0.2, 5))
+f_szzb
+```
+
+Here is the relative advantage (%) of the fast grp in the above plot.
+
+```{r}
+fitness_fish_avg2%>%
+  filter(fit.relative_fitness != 1, grp == "fast")%>%
+  mutate(rf = fit.relative_fitness-1)%>%
+  .$rf%>%
+  summary()
+```
+Here is the relative disadvantage (%) of the slow grp in the above plot.
+
+```{r}
+fitness_fish_avg2%>%
+  filter(fit.relative_fitness != 1, grp == "slow")%>%
+  mutate(rf = 1-fit.relative_fitness)%>%
+  .$rf%>%
+  summary()
+```
+
+Finally, let's assume that fish predation is weaker and thus that parasites spend more time in copepods before transmisson. Let's look at expected egg output if parasites spend 16 days in copepods.
+
+```{r}
+fitness_fish3 <- left_join(ungroup(fitness_fish), 
+                         fitness_cop%>%
+                           ungroup()%>%
+                           filter(days_cop == 16)%>%
+                           select(iter, grp, prob_to_inf_fish),
+                         by = c("grp", "iter")
+                         )
+
+fitness_fish3 <- fitness_fish3%>%
+  mutate(expected_eggs_dX = prob_to_inf_fish * expected_eggs,
+         relative_fitness = 1)
+mx <- fitness_fish3%>%filter(expected_eggs_dX>0)%>%.$expected_eggs_dX%>%min()
+
+fitness_fish3$relative_fitness[which(fitness_fish3$grp == "fast")] <- 
+  (fitness_fish3%>%
+  filter(grp=="fast")%>%.$expected_eggs_dX+mx) /
+  (fitness_fish3%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+fitness_fish3$relative_fitness[which(fitness_fish3$grp == "slow")] <- 
+  (fitness_fish3%>%
+  filter(grp=="slow")%>%.$expected_eggs_dX+mx) /
+  (fitness_fish3%>%
+  filter(grp=="control")%>%.$expected_eggs_dX+mx)
+
+# for each variable, take median, upper and lower CI at each day
+fitness_fish_avg3 <- fitness_fish3%>%
+  group_by(grp, days_fish)%>%
+  summarise(across( 
+    c(fish_surv, pler_size, eggs, bird_inf_rate, expected_eggs_dX, relative_fitness),
+    med_upr_lwr,
+    .names = "{.fn}.{.col}")
+    )%>%
+  ungroup()
+
+fitness_fish_avg3 <- fitness_fish_avg3%>%
+  mutate(grp = fct_relevel(grp, c("fast", "control", "slow")))
+```
+
+The difference between selection grps is smaller because the fast grp no longer enjoys the advantage of earlier transmission.
+
+```{r}
+f_szzc <- ggplot(fitness_fish_avg3, 
+       aes(x = days_fish,
+           y = fit.expected_eggs_dX/1000,
+           color = grp)) +
+  geom_line(aes(y = lwr.expected_eggs_dX/1000), linetype = "dotted") +
+  geom_line(aes(y = upr.expected_eggs_dX/1000), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2"),
+                     labels = c("fast", "avg", "slow")) +
+  scale_x_continuous(limits = c(35, 90)) +
+  labs(x = "Days in sticklebacks",
+       y = "Eggs (thousands)\ntransmitted from copepods 16 dpi") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1))
+f_szzc
+```
+
+Accordingly, the differences in relative fitness are much smaller.
+
+```{r}
+f_szzd <- ggplot(fitness_fish_avg3, 
+       aes(x = days_fish,
+           y = fit.relative_fitness,
+           color = grp)) +
+  geom_line(aes(y = lwr.relative_fitness), linetype = "dotted") +
+  geom_line(aes(y = upr.relative_fitness), linetype = "dashed") +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("pink2", "gray60", "lightblue2")) +
+  scale_x_continuous(limits = c(35, 90)) +
+  scale_y_log10() +
+  labs(x = "Days in sticklebacks",
+       y = "Relative fitness\ntransmitted from copepods 16 dpi") +
+  theme(legend.title = element_blank(),
+        legend.background = element_rect(color = "black"),
+        legend.position = c(0.025, 0.975),
+        legend.justification = c(0, 1)) +
+  coord_cartesian(ylim = c(0.2, 5))
+f_szzd
+```
+Here is the relative advantage (%) of the fast line in the above plot.
+
+```{r}
+fitness_fish_avg3%>%
+  filter(fit.relative_fitness != 1, grp == "fast")%>%
+  mutate(rf = fit.relative_fitness-1)%>%
+  .$rf%>%
+  summary()
+```
+Here is the relative disadvantage (%) of the slow grp in the above plot.
+
+```{r}
+fitness_fish_avg3%>%
+  filter(fit.relative_fitness != 1, grp == "slow")%>%
+  mutate(rf = 1-fit.relative_fitness)%>%
+  .$rf%>%
+  summary()
+```
+
+```{r}
+f_sz <- cowplot::plot_grid(
+  cowplot::plot_grid(f_szc + guides(color="none"), f_szd + guides(color="none")),
+  cowplot::plot_grid(f_sza + guides(color="none"), f_szb + guides(color="none")),
+  cowplot::plot_grid(f_szza + guides(color="none"), f_szzb + guides(color="none")),
+  cowplot::plot_grid(f_szzc, f_szzd + guides(color="none")),
+  nrow = 2,
+  align = "hv",
+  labels = "AUTO"
+)
+
+ggsave(f_sz, filename = "../figs/figSZ_fitness_grps.png", width = 75*3.5, height = 75*2, units = "mm")
+```
+
+
+# Conclusion
+
+Parasites from fast-developing families are more likely to infect copepods and fish, and they have higher fecundity. Thus, they have about 20% higher fitness compared to average families. This would be higher if they did not reduce the survival of their fish hosts. 
+
+```{r}
+
+```
+

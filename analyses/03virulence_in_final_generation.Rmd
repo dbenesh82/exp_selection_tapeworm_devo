@@ -1,0 +1,492 @@
+---
+title: "Survival experiment in final generation"
+output: 
+  github_document:
+    toc: true
+    df_print: kable
+---
+
+We selected a tapeworm *S. solidus* for faster development in its copepod first host. We observed a significant response to selection. It is commonly assumed that parasites do not grow/develop faster in their hosts because the increased consumption of host resources would decrease host survival and, by association, parasite survival. To test the idea that faster development comes at the cost of higher virulence/lower host survival, we infected copepods with parasites from our selection lines and then followed their survival for 30 days. Furthermore, half the parasites were fed well and half were starved.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(survival)
+library(survminer)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+options(stringsAsFactors = FALSE)
+theme_set(theme_bw())
+theme_update(panel.grid.minor = element_blank())
+```
+
+
+```{r}
+dat <- read.csv(file="../data/vir_exp_rawdata.csv", header = TRUE, sep = ";")
+```
+```{r}
+# make nicer data
+dat2 <- dat%>%
+  select(cop = cop.ID, Gen, Inf.round, clutch = Clutch, line = Line, exposed = Exposed,
+         checking_day = Day.checked, cop_stage_checking = Stage.at.checking,
+         infection = Inf..0.uninf.1.inf.,
+         grp = Grp, starved = Trt..0.starved..1.fed.,
+         dead = Surv, dpi = days
+         )%>%
+  mutate(grp = factor(grp, c("unexp", "uninf", "slow", "control", "fast")),
+         starved_fct = if_else(starved == 0, "starved", "fed"),
+         inf_grp = case_when(exposed == 0 ~ "unexposed",
+                             infection == 0 ~ "uninfected",
+                             infection == 1 ~ "infected"),
+         cop_stage_checking = factor(cop_stage_checking, levels = c("C2", "C1", "C3")))%>%
+  mutate(starved_fct = factor(starved_fct, levels = c("fed", "starved")),
+         inf_grp = factor(inf_grp, levels = c("unexposed", "uninfected", "infected")))
+```
+```{r}
+write.csv(
+  select(dat2, cop, Inf.round, clutch, selection_line = line, exposed,
+         checking_day, cop_stage_checking, infection, grp, dead, dpi),
+  file = "../data/vir_exp_final_gen.csv", row.names = F)
+```
+
+After exposing copepods, they were checked for infection. Most copepods were checked on day 2, but some copepods were not checked at all. The unchecked copepods died before days 2 to 5.
+
+```{r}
+table(dat2$checking_day, useNA = "ifany")
+```
+
+Here is the same table, but expressed as proportions.
+
+```{r}
+tx <- round(prop.table(table(dat2$checking_day, useNA = "ifany")),3)
+tx
+```
+
+The majority were checked by day 3: `r (tx[1]+tx[2]) * 100`%. Still, `r tx[4] * 100`% were not checked for infection. This early mortality is unlikely to be due to infection, but let's nonetheless explore the possibility that this mortality would bias group comparisons. Here are the numbers of copepods that were and were not checked for infection. There are not clear differences between the selection lines, but the starved copepods might have higher mortality.
+
+```{r}
+dx_checked <- dat2%>%
+  group_by(starved_fct, line)%>%
+  summarise(n_not_checked = sum(is.na(checking_day)), 
+            n_checked = sum(!is.na(checking_day)),
+            prop_not_checked = round(sum(is.na(checking_day))/length(checking_day), 3))
+dx_checked
+```
+
+We can use chi square tests to compare the proportion of unchecked copepods across groups. First, we'll compare all 8 groups above. The test is not significant.
+
+```{r}
+chi_all <- chisq.test(
+  dx_checked%>%
+    ungroup()%>%
+    select(n_not_checked, n_checked)%>%
+    as.matrix()
+)
+chi_all
+```
+
+Our main interest, though, is comparing selection lines within feeding treatments. Therefore, we repeat the chi square test comparing lines within the 'starved' and 'fed' groups. Here is the comparison among starved groups. It is not significant.
+
+```{r}
+chi_starved <- chisq.test(
+  dx_checked%>%
+    ungroup()%>%
+    filter(starved_fct == "starved")%>%
+    select(n_not_checked, n_checked)%>%
+    as.matrix()
+)
+chi_starved
+```
+
+The comparison among fed groups is also not significant.
+
+```{r}
+chi_fed <- chisq.test(
+  dx_checked%>%
+    ungroup()%>%
+    filter(starved_fct == "fed")%>%
+    select(n_not_checked, n_checked)%>%
+    as.matrix()
+)
+chi_fed
+```
+
+We can also compare the feeding treatments regardless of selection line. Here are those numbers. More died prior to checking in the starved treatment, as might be expected.
+
+```{r}
+dx_checked2 <- dat2%>%
+  group_by(starved_fct)%>%
+  summarise(n_not_checked = sum(is.na(checking_day)), 
+            n_checked = sum(!is.na(checking_day)),
+            prop_not_checked = sum(is.na(checking_day))/length(checking_day))
+dx_checked2
+```
+
+The chi square test is marginally significant. So, overall, there was little difference among treatment groups in the proportion of copepods that died before being checked.
+
+```{r}
+chi_starv_vs_fed <- chisq.test(
+  dx_checked2%>%
+    ungroup()%>%
+    select(n_not_checked, n_checked)%>%
+    as.matrix()
+)
+chi_starv_vs_fed
+```
+
+Thus, let's exclude the ones that died before checking so that we can compare copepods where infection status ws known.
+
+```{r}
+dat2 <- dat2%>%
+  filter(!is.na(checking_day))
+
+
+dat2 <- dat2%>%
+  mutate(grp2 = fct_collapse(grp, uninfected = c("unexp", "uninf")))
+```
+
+After excluding the unchecked copepods, here are the numbers of copepods in the different groups.
+
+```{r}
+with(dat2, table(grp, starved_fct))
+```
+
+Now we can start to fit statistical models. We'll fit cox regression models that account for censoring (i.e. copepods that did not die during the experiment). From the main [analysis](02testing_selection_response.md), we found that smaller copepod stages were more likely to die. Thus, we start with a model that includes copepod stage at checking. We also include starvation. Here is the summary for this model. Several parameters are significant and the likelihood ratio test indicates is is much better than an intercept-only model.
+
+```{r}
+# cox0 <- coxph(Surv(dpi, dead) ~ 1, data = dat2)
+cox1 <- coxph(Surv(dpi, dead) ~ cop_stage_checking + starved_fct, data = dat2)
+summary(cox1)
+```
+
+We might also expect starvation to have a bigger effect on small copepod stages. We can test this by adding an interaction to the model. The likelihood ratio test suggests this is an improvement.
+
+```{r}
+cox1x <- coxph(Surv(dpi, dead) ~ cop_stage_checking * starved_fct, data = dat2)
+anova(cox1, cox1x)
+```
+
+Let's plot the data.
+
+```{r}
+fit1 <- survfit(Surv(dpi, dead) ~ cop_stage_starved_grp,
+                data=dat2%>%
+                  mutate(cop_stage_starved_grp = paste0(starved_fct, cop_stage_checking))
+                )
+
+gg1 <- ggsurvplot(
+  fit1,
+  conf.int = TRUE)
+
+surv_plot_dat <- gg1$data.survplot
+surv_plot_dat <- surv_plot_dat%>%
+  mutate(cop_stage_checking = gsub("starved", "", gsub("fed", "", cop_stage_starved_grp)),
+         starved_fct = case_when(grepl(pattern = "fed", cop_stage_starved_grp) ~ "fed",
+                                 grepl(pattern = "starve", cop_stage_starved_grp) ~ "starved"),
+         upper = if_else(surv == 0, 0, upper),
+         lower = if_else(surv == 0, 0, lower)
+         )
+
+surv_plot_dat <- surv_plot_dat%>%
+  bind_rows(., 
+            dat2%>%
+              select(cop_stage_checking, starved_fct)%>%
+              distinct()%>%
+              mutate(time = 5, surv = 1, lower = 1, upper = 1)
+            )
+```
+
+Starved copepods had a much higher mortality rate, especially the smaller copepods (C1s and C2s). Notice how the confidence interval for the C2s is much narrower than for the other groups. This is because most of the copepods in the experiment were C2s.
+
+```{r}
+ggplot(surv_plot_dat,
+       aes(time, surv)) +
+  geom_ribbon(aes(fill = cop_stage_checking, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = cop_stage_checking)) +
+  geom_point(aes(color = cop_stage_checking), shape = 3) +
+  facet_wrap(~starved_fct, scales = "free_x") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95,0.95),
+        legend.justification = c(1,1),
+        legend.background = element_rect(color = "black"))
+```
+
+About 90% of copepods were C2s at infection, so comparisons among infection groups are best made within C2s.
+
+```{r}
+with(dat2, round(prop.table(table(cop_stage_checking)),3))
+```
+
+Now, let's test whether infection impacts survival. We add infection and its interaction with starvation to the model. There were three infection groups: unexposed controls, exposed-but-uninfect copepods, and infected copepods. The likelihood ratio test suggests that adding infection does not improve the model.
+
+```{r}
+cox2 <- coxph(Surv(dpi, dead) ~ cop_stage_checking * starved_fct + starved_fct * inf_grp, data = dat2)
+anova(cox1x, cox2)
+```
+
+Let's plot the infection groups, separated by copepod stage and starvation treatment.
+
+```{r}
+fit2 <- survfit(Surv(dpi, dead) ~ comb_grp,
+                data=dat2%>%
+                  mutate(comb_grp = paste0(starved_fct, "_", cop_stage_checking, "_", inf_grp))
+                )
+
+gg2 <- ggsurvplot(
+  fit2,
+  conf.int = TRUE)
+
+surv_plot_dat2 <- gg2$data.survplot
+surv_plot_dat2 <- surv_plot_dat2%>%
+  mutate(starved_fct = substr(comb_grp, 1, stop = regexpr(pattern = "_", comb_grp)-1 ),
+         cop_stage_checking = substr(comb_grp, 
+                                     start = regexpr(pattern = "_", comb_grp) + 1, 
+                                     stop = regexpr(pattern = "_", comb_grp) + 2 ),
+         inf_grp = substr(comb_grp, 
+                          start = regexpr(pattern = "_", comb_grp) + 4,
+                          stop = nchar(as.character(comb_grp))),
+         upper = if_else(surv == 0, 0, upper),
+         lower = if_else(surv == 0, 0, lower)
+         )
+
+surv_plot_dat2 <- surv_plot_dat2%>%
+  bind_rows(., 
+            dat2%>%
+              select(cop_stage_checking, starved_fct, inf_grp)%>%
+              distinct()%>%
+              mutate(time = 5, surv = 1, lower = 1, upper = 1)
+            )%>%
+  mutate(inf_grp = factor(inf_grp, levels = c("unexposed", "uninfected", "infected")))
+```
+
+Unexposed controls and uninfected copepods rarely differ, so we can pool these groups. Infected copepods also did not have higher mortality.
+
+```{r}
+ggplot(surv_plot_dat2,
+       aes(time, surv)) +
+  geom_ribbon(aes(fill = inf_grp, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = inf_grp)) +
+  geom_point(aes(color = inf_grp), shape = 3) +
+  facet_grid(cop_stage_checking~starved_fct, scales = "free_x") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  theme(legend.title = element_blank())
+```
+
+This is easier to see if we focus on C2 copepods, thereby excluding the impact of copepod stage. The three infection groups are quite comparable.
+
+```{r}
+ggplot(surv_plot_dat2%>%filter(cop_stage_checking == "C2"),
+       aes(time, surv)) +
+  geom_ribbon(aes(fill = inf_grp, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = inf_grp)) +
+  geom_point(aes(color = inf_grp), shape = 3) +
+  facet_wrap(~starved_fct, scales = "free") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_brewer(palette = "Set2") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95,0.95),
+        legend.justification = c(1,1),
+        legend.background = element_rect(color = "black"))
+```
+
+Instead of ribbons, we can use dotted lines to show the confidence intervals. This makes it easier to see if certain groups have overlapping CIs.
+
+```{r}
+ggplot(surv_plot_dat2%>%filter(cop_stage_checking == "C2"),
+       aes(time, surv)) +
+  # geom_ribbon(aes(fill = inf_grp, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = inf_grp), size = 1.25) +
+  geom_line(aes(color = inf_grp, y = lower), linetype = "dotted") +
+  geom_line(aes(color = inf_grp, y = upper), linetype = "dotted") +
+  geom_point(aes(color = inf_grp), shape = 3) +
+  facet_wrap(~starved_fct, scales = "free") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_brewer(palette = "Set2") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95,0.95),
+        legend.justification = c(1,1),
+        legend.background = element_rect(color = "black"))
+```
+
+Finally, we can break apart the infected copepods into copepods harboring parasites from the different selection lines. When we add this term to the model, it is not an improvement.
+
+```{r}
+cox3 <- coxph(Surv(dpi, dead) ~ cop_stage_checking * starved_fct + starved_fct * grp2, data = dat2)
+anova(cox2, cox3)
+```
+
+Again, we can plot the data, broken down by copepod stage and starvation treatment.
+
+```{r}
+fit3 <- survfit(Surv(dpi, dead) ~ comb_grp,
+                data=dat2%>%
+                  mutate(comb_grp = paste0(starved_fct, "_", cop_stage_checking, "_", grp2))
+                )
+
+gg3 <- ggsurvplot(
+  fit3,
+  conf.int = TRUE)
+
+surv_plot_dat3 <- gg3$data.survplot
+surv_plot_dat3 <- surv_plot_dat3%>%
+  mutate(starved_fct = substr(comb_grp, 1, stop = regexpr(pattern = "_", comb_grp)-1 ),
+         cop_stage_checking = substr(comb_grp, 
+                                     start = regexpr(pattern = "_", comb_grp) + 1, 
+                                     stop = regexpr(pattern = "_", comb_grp) + 2 ),
+         grp2 = substr(comb_grp, 
+                          start = regexpr(pattern = "_", comb_grp) + 4,
+                          stop = nchar(as.character(comb_grp))),
+         upper = if_else(surv == 0, 0, upper),
+         lower = if_else(surv == 0, 0, lower)
+         )
+
+surv_plot_dat3 <- surv_plot_dat3%>%
+  bind_rows(., 
+            dat2%>%
+              select(cop_stage_checking, starved_fct, grp2)%>%
+              distinct()%>%
+              mutate(time = 5, surv = 1, lower = 1, upper = 1)
+            )%>%
+  mutate(grp2 = factor(grp2, levels = c("uninfected", "slow", "control", "fast")))
+```
+
+The groups do not seem to differ at any copepod stage. However, since there are relatively few C1 and C3 copepods infected with parasites from each line, it is better to focus on the C2 copepods.
+
+```{r}
+ggplot(surv_plot_dat3,
+       aes(time, surv)) +
+  # geom_ribbon(aes(fill = grp2, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = grp2), size = 1.25) +
+  geom_line(aes(color = grp2, y = lower), linetype = "dotted") +
+  geom_line(aes(color = grp2, y = upper), linetype = "dotted") +
+  geom_point(aes(color = grp2), shape = 3) +
+  facet_grid(cop_stage_checking~starved_fct, scales = "free_x") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_manual(values = c("gray", "blue", "black", "red")) +
+  scale_fill_manual(values = c("gray", "blue", "black", "red")) +
+  theme(legend.title = element_blank())
+```
+
+Here is the survival of the C2 copepods. Copepods infected with the different lines do not differ much in survival rates.
+
+```{r}
+ggplot(surv_plot_dat3%>%filter(cop_stage_checking == "C2"),
+       aes(time, surv)) +
+  # geom_ribbon(aces(fill = grp2, ymin=lower, ymax=upper), alpha = 0.2) +
+  geom_line(aes(color = grp2), size = 1.5) +
+  geom_line(aes(color = grp2, y = lower), linetype = "dotted") +
+  geom_line(aes(color = grp2, y = upper), linetype = "dotted") +
+  geom_point(aes(color = grp2), shape = 3) +
+  facet_wrap(~starved_fct, scales = "free") +
+  labs(x = "Days post exposure", y = "Survival probability") + 
+  scale_color_manual(values = c("gray", "blue", "black", "red")) +
+  scale_fill_manual(values = c("gray", "blue", "black", "red")) +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95,0.95),
+        legend.justification = c(1,1),
+        legend.background = element_rect(color = "black"))
+```
+
+The starved treatment died so fast that differences among groups are harder to detect. Therefore, let's also make a plot with just the 'fed' copepods.
+
+```{r}
+# for adding sample sizes to fig
+dx_t <- dat2%>%
+  filter(cop_stage_checking == "C2", starved_fct == "fed")%>%
+  group_by(grp2)%>%
+  summarise(n = n())
+
+dx_t2 <- surv_plot_dat3%>%
+  filter(cop_stage_checking == "C2", starved_fct == "fed", time == 30)
+dx_t <- left_join(dx_t, select(dx_t2, surv, time, grp2), by = "grp2")
+
+f4x <- ggplot(surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "fed", grp2 != "uninfected")%>%
+                mutate(grp2 = fct_drop(grp2)),
+       aes(time, surv)) +
+  geom_ribbon(data = surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "fed", grp2 == "uninfected"),
+              aes(ymin = lower, ymax = upper),
+              color = NA, alpha = 0.2) +
+  geom_line(data = surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "fed", grp2 == "uninfected"),
+              aes(ymin = lower, ymax = upper),
+              color = "black", linetype = "dashed") +
+  geom_line(aes(color = grp2), size = 1) +
+  geom_line(aes(color = grp2, y = lower), linetype = "dotted") +
+  geom_line(aes(color = grp2, y = upper), linetype = "dotted") +
+  geom_point(aes(color = grp2), shape = 3) +
+  geom_text(data = dx_t%>%filter(grp2 != "uninfected"),
+             aes(label = n, x = time + 0.5, y = surv, color = grp2),
+             hjust = 0, size = 2) +
+  # geom_text(data = dx_t%>%filter(grp2 == "uninfected"),
+  #           aes(label = n, x = time + 0.5, y = surv-.02),
+  #           color = "black",
+  #           hjust = 0) +
+  labs(x = "Days post exposure", y = "Copepod survival, fed") + 
+  scale_color_manual(values = c("blue", "black", "red")) +
+  theme(legend.title = element_blank())
+f4x
+```
+
+```{r}
+# for adding sample sizes to fig
+dx_t <- dat2%>%
+  filter(cop_stage_checking == "C2", starved_fct == "starved")%>%
+  group_by(grp2)%>%
+  summarise(n = n())
+
+dx_t2 <- surv_plot_dat3%>%
+  filter(cop_stage_checking == "C2", starved_fct == "starved", time == 6)
+dx_t <- left_join(dx_t, select(dx_t2, surv, time, grp2), by = "grp2")
+
+f4y <- ggplot(surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "starved", grp2 != "uninfected", time >5, time < 10)%>%
+                mutate(grp2 = fct_drop(grp2)),
+       aes(time, surv)) +
+  geom_ribbon(data = surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "starved", grp2 == "uninfected", time >5, time < 10),
+              aes(ymin = lower, ymax = upper),
+              color = NA, alpha = 0.2) +
+  geom_line(data = surv_plot_dat3%>%
+                filter(cop_stage_checking == "C2", starved_fct == "starved", grp2 == "uninfected", time >5, time < 10),
+              aes(ymin = lower, ymax = upper),
+              color = "black", linetype = "dashed") +
+  geom_line(aes(color = grp2), size = 1) +
+  geom_line(aes(color = grp2, y = lower), linetype = "dotted") +
+  geom_line(aes(color = grp2, y = upper), linetype = "dotted") +
+  geom_point(aes(color = grp2), shape = 3) +
+  geom_text(data = dx_t%>%filter(grp2 != "uninfected"),
+             aes(label = n, x = time, y = surv, color = grp2),
+             hjust = 1, size = 2) +
+  # geom_text(data = dx_t%>%filter(grp2 == "uninfected"),
+  #           aes(label = n, x = time, y = surv),
+  #           color = "black",
+  #           hjust = 1) +
+  labs(x = "Days post exposure", y = "Copepod survival, starved") + 
+  scale_color_manual(values = c("blue", "black", "red")) +
+  scale_x_continuous(breaks = c(6,8)) +
+  theme(legend.title = element_blank())
+# f4y
+```
+
+In conclusion, parasites that evolved faster or slower development in copepods were not more likely to kill their copepods. This applied regardless of whether copepods were stressed through starvation or not. The results are not consistent with a cost of virulence associated with rapid development.
+
+```{r}
+rm(list = ls()[!ls() %in% c("f4x", "f4y")])
+```
+
+```{r}
+save.image(file = "03survival_plot.RData")
+```
+
+```{r}
+sessionInfo()
+```
+
+

@@ -1,0 +1,5565 @@
+---
+title: "Multivariate models and quantitative genetics"
+output: 
+  github_document:
+    toc: true
+    df_print: kable
+---
+
+I experimentally selected tapeworms (*S. solidus*) for faster and slower development in their first intermediate host, copepods. [Elsewhere](02testing_selection_response.md) I tested whether there was a response to selection and whether there were correlated responses in other traits. Correlated responses are the consequence of genetic correlations. Another way to explore correlated responses is by fitting multivariate models and examining covariance between traits. We are particularly interested in genetic covariance between traits suggestive of pleiotropy.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(MCMCglmm)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+options(stringsAsFactors = FALSE)
+theme_set(theme_bw())
+theme_update(panel.grid.minor = element_blank())
+```
+
+```{r}
+load("04quant_gen_univariate.RData") # output for '04quant_gen_univariate.RMD'
+```
+
+```{r}
+rm(list = ls()[grep("m2_|m3_|dat|m_vc_comb", ls(), invert = T)]) # remove everything that does not start with m1 or dat
+```
+
+```{r}
+dat <- read.csv(file="../data/sel_exp_data.csv", header = TRUE)
+```
+```{r}
+#Make some centered variables...
+dat <- dat%>%
+  mutate(cop_length_cen = scale(cop_length_mm, scale = FALSE),
+         fish_initial_tl_cen = scale(fish_initial_tl, scale = FALSE),
+         fish_initial_bm_cen = scale(fish_initial_bm_g, scale = FALSE),
+         fish_sex_cen = fish_sex - 0.5,
+         proc_size2 = procercoid_size/1000, # avoid numerical problems
+         proc_size_std = scale(procercoid_size, scale = TRUE),
+         worm_bm_mg_std = scale(worm_bm_mg, scale = TRUE),
+         tank_id = if_else(tank_id %in% c("_", "0_","1_","2_", "3_", "4_"), NA_character_, tank_id),
+         gen_line = if_else(line !="",paste(gen, line, sep = "_"), NA_character_))%>%
+  mutate(gen_line = factor(gen_line, levels = c("0_base", "1_control", "1_fast", "1_slow",
+                                                "2_control", "2_fast", "2_slow", 
+                                                "3_control", "3_fast", "3_slow",
+                                                "4_control", "4_fast", "4_slow")),
+         cop_stage_checking = factor(cop_stage_checking, levels = c("C1", "C2", "C3", "C4")))
+```
+```{r}
+# center age here
+med_age_diss <- filter(dat, schisto_inf == 1, fish_surv == 0)%>%.$age_dissection%>%mean(na.rm = T)
+```
+```{r}
+# full pedigree and relatedness matrix
+ped <- select(dat, id, dam, sire)%>%
+  mutate_all(as.factor)
+
+Ainv <- inverseA(ped)$Ainv
+ib <- inverseA(ped)$inbreeding
+
+dat <- left_join(
+  dat%>%mutate(across(id:sire, as.factor)),
+  ped%>%mutate(ib = ib)%>%select(id, ib)
+)
+```
+
+We measured 11 response variables:
+1. copepod infection rate
+2. cercomere presence 9 days post infection (dpi)
+3. copepod survival 13 dpi
+4. successful/failed development 13 dpi
+5. procercoid size 13 dpi
+6. fish infection rate
+7. fish liver weight
+8. fish growth
+9. fish survival until dissection
+10. plerocercoid mass
+11. fecundity
+
+Some of these are actually characteristics of hosts that might be affected by parasites. Since we are focused on parasite genetics, we only use the infected hosts in our multivariate models. For example, we removed the data points for e.g. host survival corresponding to uninfected hosts. We also log transformed several variables (liver weight, plerocercoid mass, and fecundity) and scaled continuous variables to unit variance to aid model fitting. 
+
+```{r}
+dat_multi <- filter(dat, !is.na(cop_inf), cop_stage_checking != "") # exclude those not checked
+
+dat_multi <- dat_multi%>%
+  mutate(log_ww = log(worm_bm_mg),
+         log_liver = if_else(schisto_inf == 1, log(fish_liver_mg), NA_real_), # only infecteds
+         fish_final_bm_just_inf = if_else(schisto_inf == 1, fish_final_bm_g_noworm, NA_real_),
+         fish_surv = if_else(schisto_inf == 1, fish_surv, NA_integer_),
+         cop_dead_13dpe = if_else(cop_inf == 1, cop_dead_13dpe, NA_integer_),
+         log_fish_initial_bm = log(fish_initial_bm_g),
+         log_eggs = log(eggnum_d2_6_indiv),
+         nofailed_devo_bi = if_else(failed_devo_bi == 0, 1, 0)
+         )%>%
+  mutate(fish_surv = if_else(fish_surv == 0, 1, 0),
+         cop_surv_13dpe = if_else(cop_dead_13dpe == 0, 1, 0),
+         age_diss_cen = age_dissection - med_age_diss,
+         log_fish_initial_bm_cen = log_fish_initial_bm - log(mean(dat$fish_initial_bm_g, na.rm = T)))%>%
+  mutate(fish_surv75 = if_else(age_dissection > 73 & fish_surv == 0, 1, fish_surv))%>%
+  # scale all continuous response variables (makes var components comparable)
+  mutate(proc_scl = scale(procercoid_size), 
+         log_ww_scl = scale(log_ww), 
+         log_liver_scl = scale(log_liver), 
+         fgrow_scl = scale(fish_final_bm_just_inf), 
+         eggs_scl = scale(log_eggs))
+dat_multi$fish_surv75[
+  which(is.na(dat_multi$age_dissection) & !is.na(dat_multi$fish_surv))
+] <- 0
+```
+
+```{r}
+# make sure no missing values for fixed effects
+dat_multi <- dat_multi%>%
+  mutate(fish_sex_cen = if_else(is.na(fish_sex_cen), 0, fish_sex_cen),
+         fish_initial_bm_cen = if_else(is.na(fish_initial_bm_cen), 0, fish_initial_bm_cen),
+         age_diss_cen = if_else(is.na(age_diss_cen), 0, age_diss_cen),
+         log_fish_initial_bm_cen = if_else(is.na(log_fish_initial_bm_cen), 0, log_fish_initial_bm_cen),
+         fish_exp_on_cop_dpe = if_else(is.na(fish_exp_on_cop_dpe), as.integer(14), fish_exp_on_cop_dpe)
+         )%>%
+  mutate(fish_exp_on_cop_dpe_fct = factor(fish_exp_on_cop_dpe, levels = c("14", "12", "16")),
+         cop_stage_checking = factor(cop_stage_checking, levels = c("C2", "C1", "C3", "C4")))
+```
+
+
+```{r}
+# preds for E-mat
+dat_cinf$p_e_cinf <- predict.MCMCglmm(m3_cinf_mat, type = "terms", marginal = ~cop_block+dam)
+dat_cerc$p_e_cerc <- predict.MCMCglmm(m3_cerc_mat, type = "terms", marginal = ~cop_block+dam)
+dat_proc$p_e_proc <-predict.MCMCglmm(m3_proc_mat, type = "terms", marginal = ~cop_block+dam)
+dat_fail$p_e_fail <- 1 - predict.MCMCglmm(m2_fail_fam, type = "terms", marginal = ~cop_block)
+dat_surv13_2$p_e_surv <- 1 - predict.MCMCglmm(m3_surv_mat, type = "terms", marginal = ~cop_block+dam)
+dat_finf$p_e_finf <- predict.MCMCglmm(m2_finf_fam, type = "terms", marginal = ~cop_block)
+dat_fsurv2$p_e_fsurv <- 1 - predict.MCMCglmm(m2_fsurv_fam, type = "terms", marginal = ~tank_id)
+dat_pler$p_e_pler <- predict.MCMCglmm(m2_pler_fam, type = "terms", marginal = ~tank_id)
+dat_liver2$p_e_liver <- predict.MCMCglmm(m2_liver_fam, type = "terms", marginal = ~tank_id)
+dat_fgrow2$p_e_fgrow <- predict.MCMCglmm(m2_fgrow_fam, type = "terms", marginal = ~tank_id)
+dat_bred$p_e_eggs <- predict.MCMCglmm(m2_bred_fam, type = "terms", marginal = ~breeding_block)
+
+# preds for G-mat
+dat_cinf$p_g_cinf <- predict.MCMCglmm(m3_cinf_mat, type = "terms", marginal = ~worm_full_sib_fam_id+dam)
+dat_cerc$p_g_cerc <- predict.MCMCglmm(m3_cerc_mat, type = "terms", marginal = ~worm_full_sib_fam_id+dam)
+dat_proc$p_g_proc <- predict.MCMCglmm(m3_proc_mat, type = "terms", marginal = ~worm_full_sib_fam_id+dam)
+dat_fail$p_g_fail <- 1 - predict.MCMCglmm(m2_fail_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_surv13_2$p_g_surv <- 1 - predict.MCMCglmm(m3_surv_mat, type = "terms", marginal = ~worm_full_sib_fam_id+dam)
+dat_finf$p_g_finf <- predict.MCMCglmm(m2_finf_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_fsurv2$p_g_fsurv <- 1 - predict.MCMCglmm(m2_fsurv_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_pler$p_g_pler <- predict.MCMCglmm(m2_pler_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_liver2$p_g_liver <- predict.MCMCglmm(m2_liver_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_fgrow2$p_g_fgrow <- predict.MCMCglmm(m2_fgrow_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+dat_bred$p_g_eggs <- predict.MCMCglmm(m2_bred_fam, type = "terms", marginal = ~worm_full_sib_fam_id)
+
+# preds for M-mat
+dat_cinf$p_m_cinf <- predict.MCMCglmm(m3_cinf_mat, type = "terms", marginal = ~dam)
+dat_cerc$p_m_cerc <- predict.MCMCglmm(m3_cerc_mat, type = "terms", marginal = ~dam)
+dat_proc$p_m_proc <- predict.MCMCglmm(m3_proc_mat, type = "terms", marginal = ~dam)
+dat_surv13_2$p_m_surv <- 1 - predict.MCMCglmm(m3_surv_mat, type = "terms", marginal = ~dam)
+
+# preds for R-mat
+dat_cinf$p_r_cinf <- predict.MCMCglmm(m3_cinf_mat, type = "terms", marginal = NULL)
+dat_cerc$p_r_cerc <- predict.MCMCglmm(m3_cerc_mat, type = "terms", marginal = NULL)
+dat_proc$p_r_proc <- predict.MCMCglmm(m3_proc_mat, type = "terms", marginal = NULL)
+dat_fail$p_r_fail <- 1 - predict.MCMCglmm(m2_fail_fam, type = "terms", marginal = NULL)
+dat_surv13_2$p_r_surv <- 1 - predict.MCMCglmm(m3_surv_mat, type = "terms", marginal = NULL)
+dat_finf$p_r_finf <- predict.MCMCglmm(m2_finf_fam, type = "terms", marginal = NULL)
+dat_fsurv2$p_r_fsurv <- 1 - predict.MCMCglmm(m2_fsurv_fam, type = "terms", marginal = NULL)
+dat_pler$p_r_pler <- predict.MCMCglmm(m2_pler_fam, type = "terms", marginal = NULL)
+dat_liver2$p_r_liver <- predict.MCMCglmm(m2_liver_fam, type = "terms", marginal = NULL)
+dat_fgrow2$p_r_fgrow <- predict.MCMCglmm(m2_fgrow_fam, type = "terms", marginal = NULL)
+dat_bred$p_r_eggs <- predict.MCMCglmm(m2_bred_fam, type = "terms", marginal = NULL)
+```
+
+```{r}
+# put predicted values in one data set
+dat_corr_mat <- left_join(dat_cinf%>%filter(is.na(pred)),
+                          dat_cerc%>%select(id, p_e_cerc, p_g_cerc, p_m_cerc, p_r_cerc),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_proc%>%select(id, p_e_proc, p_g_proc, p_m_proc, p_r_proc),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_fail%>%select(id, p_e_fail, p_g_fail, p_r_fail),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_surv13_2%>%select(id, p_e_surv, p_g_surv, p_m_surv, p_r_surv),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_finf%>%select(id, p_e_finf, p_g_finf, p_r_finf),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_fsurv2%>%select(id, p_e_fsurv, p_g_fsurv, p_r_fsurv),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_pler%>%select(id, p_e_pler, p_g_pler, p_r_pler),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_liver2%>%select(id, p_e_liver, p_g_liver, p_r_liver),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_fgrow2%>%select(id, p_e_fgrow, p_g_fgrow, p_r_fgrow),
+                          by = "id")
+dat_corr_mat <- left_join(dat_corr_mat,
+                          dat_bred%>%select(id, p_e_eggs, p_g_eggs, p_r_eggs),
+                          by = "id")
+```
+```{r}
+# calculate deviance residuals for all traits: https://stats.stackexchange.com/questions/1432/what-do-the-residuals-in-a-logistic-regression-mean
+dat_corr_mat <- dat_corr_mat%>%
+  mutate(
+    # E-matrix residuals
+    r_e_cinf = sqrt(-2 * log(1-pnorm(p_e_cinf))) * sign(cop_inf - pnorm(p_e_cinf)),
+    r_e_cerc = sqrt(-2 * log(1-pnorm(p_e_cerc))) * sign(cerc_bi - pnorm(p_e_cerc)),
+    r_e_proc = proc_size2 - p_e_proc,
+    r_e_fail = sqrt(-2 * log(1-pnorm(p_e_fail))) * sign( (1-failed_devo_bi) - pnorm(p_e_fail)),
+    r_e_surv = sqrt(-2 * log(1-pnorm(p_e_surv))) * sign( (1 - cop_dead_13dpe) - pnorm(p_e_surv)),
+    r_e_finf = sqrt(-2 * log(1-pnorm(p_e_finf))) * sign(schisto_inf - pnorm(p_e_finf)),
+    r_e_fsurv = sqrt(-2 * log(1-pnorm(p_e_fsurv))) * sign( (1 - fish_surv) - pnorm(p_e_fsurv)),
+    r_e_pler = log(worm_bm_mg) - p_e_pler,
+    r_e_liver = log(fish_liver_mg) - p_e_liver,
+    r_e_fgrow = fish_final_bm_g_noworm - p_e_fgrow,
+    r_e_eggs = log(eggnum_d2_6_indiv) - p_e_eggs,
+    
+    # G-matrix residuals
+    r_g_cinf = sqrt(-2 * log(1-pnorm(p_g_cinf))) * sign(cop_inf - pnorm(p_g_cinf)),
+    r_g_cerc = sqrt(-2 * log(1-pnorm(p_g_cerc))) * sign(cerc_bi - pnorm(p_g_cerc)),
+    r_g_proc = proc_size2 - p_g_proc,
+    r_g_fail = sqrt(-2 * log(1-pnorm(p_g_fail))) * sign( (1 - failed_devo_bi) - pnorm(p_g_fail)),
+    r_g_surv = sqrt(-2 * log(1-pnorm(p_g_surv))) * sign( (1 - cop_dead_13dpe) - pnorm(p_g_surv)),
+    r_g_finf = sqrt(-2 * log(1-pnorm(p_g_finf))) * sign(schisto_inf - pnorm(p_g_finf)),
+    r_g_fsurv = sqrt(-2 * log(1-pnorm(p_g_fsurv))) * sign( (1 - fish_surv) - pnorm(p_g_fsurv)),
+    r_g_pler = log(worm_bm_mg) - p_g_pler,
+    r_g_liver = log(fish_liver_mg) - p_g_liver,
+    r_g_fgrow = fish_final_bm_g_noworm - p_g_fgrow,
+    r_g_eggs = log(eggnum_d2_6_indiv) - p_g_eggs,
+    
+    # M-matrix residuals
+    r_m_cinf = sqrt(-2 * log(1-pnorm(p_m_cinf))) * sign(cop_inf - pnorm(p_m_cinf)),
+    r_m_cerc = sqrt(-2 * log(1-pnorm(p_m_cerc))) * sign(cerc_bi - pnorm(p_m_cerc)),
+    r_m_proc = proc_size2 - p_m_proc,
+    r_m_surv = sqrt(-2 * log(1-pnorm(p_m_surv))) * sign( (1 - cop_dead_13dpe) - pnorm(p_m_surv)),
+    
+    # R-matrix residuals
+    r_r_cinf = sqrt(-2 * log(1-pnorm(p_r_cinf))) * sign(cop_inf - pnorm(p_r_cinf)),
+    r_r_cerc = sqrt(-2 * log(1-pnorm(p_r_cerc))) * sign(cerc_bi - pnorm(p_r_cerc)),
+    r_r_proc = proc_size2 - p_r_proc,
+    r_r_fail = sqrt(-2 * log(1-pnorm(p_r_fail))) * sign( (1 - failed_devo_bi) - pnorm(p_r_fail)),
+    r_r_surv = sqrt(-2 * log(1-pnorm(p_r_surv))) * sign( (1 - cop_dead_13dpe) - pnorm(p_r_surv)),
+    r_r_finf = sqrt(-2 * log(1-pnorm(p_r_finf))) * sign(schisto_inf - pnorm(p_r_finf)),
+    r_r_fsurv = sqrt(-2 * log(1-pnorm(p_r_fsurv))) * sign( (1 - fish_surv) - pnorm(p_r_fsurv)),
+    r_r_pler = log(worm_bm_mg) - p_r_pler,
+    r_r_liver = log(fish_liver_mg) - p_r_liver,
+    r_r_fgrow = fish_final_bm_g_noworm - p_r_fgrow,
+    r_r_eggs = log(eggnum_d2_6_indiv) - p_r_eggs
+    )
+```
+
+```{r}
+rm(list = ls()[grep("m2_|m3_", ls())]) # remove models after calculating residuals
+```
+
+We examined trait correlations pairwise, i.e. we fit bivariate instead of larger multivariate models. The reason for this was that potentially interesting (and estimable) covariances differed among traits. For example, we could estimate residual covariance between cercomere presence and fish infection because worms with and without cercomeres did and did not infect fish. By contrast, the residual covariance is unidentified between cercomere presence and copepod infection rate because all cercomeres were observed in infected copepods. For the models, continuous traits, like parasite size, were assumed to have a gaussian error distribution, whereas binary traits, like infection, were modelled as binomial traits with a probit link function.
+
+In the model for each trait, we tried to account for (i) starting conditions like copepod stage or fish sex, (ii) shared environmental factors (copepods from the same block or fish from the same tank), and (iii) parasite genetics. The starting conditions were the models' fixed effects and they were explored [elsewhere](02testing_selection_response.md);essentially they attempt to control for "nuisance" variation that could not be standardized (like fish size). Shared environments, like tank, were included as random effects. We also included trait covariance between shared environments, e.g. a tank with fish having high condition might also have bigger worms. 
+
+Before fitting bivariate models, we can crudely explore trait covariance attributable to shared environments. We took the residuals from [univariate models](04quant_gen_univariate.md) that controlled for starting conditions and parasite full-sib family. Thne, we averaged them by copepod block and tank. Some of the correlations are positive suggesting that certain blocks were characterized by better conditions for parasites (e.g. higher infection rates and faster development).
+
+```{r}
+# average at level of blocks for cop traits
+dat_corr_cop_block <- dat_corr_mat%>%
+  group_by(cop_block)%>%
+  summarise(across(r_e_cinf:r_e_finf, .fns = mean, na.rm=T), n = n())%>%
+  ungroup()
+```
+
+```{r}
+GGally::ggpairs(data = select(dat_corr_cop_block, starts_with("r_e")))
+```
+
+Here is the same plot but across tanks for traits from fish. Tanks with large worms also tended to have fish in better condition that grew more.
+
+```{r}
+# average at level tanks for fish traits
+dat_corr_tank <- dat_corr_mat%>%
+  group_by(tank_id)%>%
+  summarise(n = n(),
+            n_inf = sum(schisto_inf == 1, na.rm = T),
+            n_surv = sum(!is.na(r_e_liver)),
+            across(r_e_fsurv:r_e_fgrow, .fns = mean, na.rm=T)
+            )%>%
+  ungroup()%>%
+  filter(!is.na(tank_id))
+```
+
+```{r}
+GGally::ggpairs(data = dat_corr_tank%>%filter(!is.nan(r_e_liver))%>%select(starts_with("r_e")))
+```
+
+Our main interest, though, is genetic covariance, e.g. whether faster larval development is traded off against other traits through pleiotropy. Again, we can look at residuals that account for everything but parasite family (i.e. shared environments and starting conditions). Then, we can average those residuals at the family level and look for correlations.
+
+```{r}
+# average at level full sib fams
+dat_corr_fams <- dat_corr_mat%>%
+  group_by(gen, line, worm_full_sib_fam_id)%>%
+  summarise(n_exp_cops = sum(!is.na(cop_inf)),
+            n_cerc = sum(!is.na(cerc_bi)),
+            n_exp_fish = sum(!is.na(schisto_inf)),
+            n_pler = sum(!is.na(worm_bm_mg)),
+            n_bred = sum(!is.na(eggnum_d2_6_indiv)),
+            across(r_g_cinf:r_g_eggs, .fns = mean, na.rm=T))%>%
+  ungroup()
+```
+
+Here are the family-level correlations for traits from copepods. There are some significant relationships.
+
+```{r}
+GGally::ggpairs(data = dat_corr_fams%>%select(r_g_cinf:r_g_finf))
+```
+
+Here is the plot for traits from sticklebacks.
+
+```{r}
+GGally::ggpairs(data = dat_corr_fams%>%ungroup()%>%filter(!is.nan(r_g_eggs))%>%select(r_g_finf:r_g_eggs))
+```
+
+```{r}
+# average at level of dams
+dat_corr_dams <- dat_corr_mat%>%
+  group_by(gen, line, worm_full_sib_fam_id, dam)%>%
+  summarise(n_exp_cops = sum(!is.na(cop_inf)),
+            across(r_m_cinf:r_m_surv, .fns = mean, na.rm=T))%>%
+  ungroup()
+```
+
+```{r}
+# # average at level of blocks for cop traits
+# dat_corr_cop_block <- dat_corr_mat%>%
+#   group_by(cop_block)%>%
+#   summarise(
+#     # expected values, link scale
+#     p_cinf = mean(p_cinf, na.rm = T),
+#     p_cerc = mean(p_cerc, na.rm = T),
+#     p_proc = mean(p_proc, na.rm = T),
+#     p_surv = mean(p_surv, na.rm = T),
+#     p_fail = mean(p_fail, na.rm = T),
+#     p_finf = mean(p_finf, na.rm = T),
+#     # obs values
+#     cinf = sum(cop_inf, na.rm = T)/sum(!is.na(cop_inf)),
+#     cerc = sum(cerc_bi, na.rm = T)/sum(!is.na(cerc_bi)),
+#     proc = mean(proc_size2, na.rm = T),
+#     surv = sum(cop_dead_13dpe, na.rm = T)/sum(!is.na(cop_dead_13dpe)),
+#     fail = sum(failed_devo_bi, na.rm = T)/sum(!is.na(failed_devo_bi)),
+#     finf = sum(schisto_inf, na.rm = T)/sum(!is.na(schisto_inf)),
+#   )%>%
+#   mutate(
+#     # corrected block avgs
+#     c_cinf = qnorm(cinf) - p_cinf,
+#     c_cerc = qnorm(cerc) - p_cerc,
+#     c_proc = proc - p_proc,
+#     c_fail = qnorm(fail) - p_fail,
+#     c_surv = qnorm(surv) - p_surv,
+#     c_finf = qnorm(finf) - p_finf,
+#   )%>%
+#   ungroup()
+
+# GGally::ggpairs(data = select(dat_corr_cop_block, starts_with("c_")))
+```
+```{r}
+# # average at level tanks for fish traits
+# dat_corr_tank <- dat_corr_mat%>%
+#   mutate(log_ww = log(worm_bm_mg),
+#          log_liver = log(fish_liver_mg))%>%
+#   filter(!is.na(tank_id))%>%
+#   group_by(tank_id)%>%
+#   summarise(
+#     # expected values, link scale
+#     p_fsurv = mean(p_fsurv, na.rm = T),
+#     p_pler = mean(p_pler, na.rm = T),
+#     p_liver = mean(p_liver, na.rm = T),
+#     p_fgrow = mean(p_fgrow, na.rm = T),
+#     # obs values
+#     fsurv = sum(fish_surv, na.rm = T)/sum(!is.na(fish_surv)),
+#     pler = mean(log_ww, na.rm = T),
+#     liver = mean(log_liver, na.rm = T),
+#     fgrow = mean(fish_final_bm_g_noworm, na.rm = T)
+#   )%>%
+#   mutate(
+#     fsurv = if_else(fsurv == 0, 0.01, fsurv)
+#   )%>%
+#   mutate(
+#     # corrected block avgs
+#     c_fsurv = qnorm(fsurv) - p_fsurv,
+#     c_pler = pler - p_pler,
+#     c_liver = liver - p_liver,
+#     c_fgrow = fgrow - p_fgrow
+#   )%>%
+#   ungroup()
+
+# GGally::ggpairs(data = dat_corr_tank%>%filter(!is.nan(p_liver))%>%select(starts_with("c_")))
+```
+```{r}
+# # average at level of fams
+# dat_corr_fams <- dat_corr_mat%>%
+#   mutate(log_ww = log(worm_bm_mg),
+#          log_liver = log(fish_liver_mg),
+#          log_eggs = log(eggnum_d2_6_indiv))%>%
+#   group_by(gen, line, worm_full_sib_fam_id)%>%
+#   summarise(
+#     n = n(),
+#     # expected values, link scale
+#     p_cinf = mean(p_cinf, na.rm = T),
+#     p_cerc = mean(p_cerc, na.rm = T),
+#     p_proc = mean(p_proc, na.rm = T),
+#     p_surv = mean(p_surv, na.rm = T),
+#     p_fail = mean(p_fail, na.rm = T),
+#     p_finf = mean(p_finf, na.rm = T),
+#     p_fsurv = mean(p_fsurv, na.rm = T),
+#     p_pler = mean(p_pler, na.rm = T),
+#     p_liver = mean(p_liver, na.rm = T),
+#     p_fgrow = mean(p_fgrow, na.rm = T),
+#     p_bred = mean(p_bred, na.rm = T),
+#     # obs values
+#     cinf = sum(cop_inf, na.rm = T)/sum(!is.na(cop_inf)),
+#     cerc = sum(cerc_bi, na.rm = T)/sum(!is.na(cerc_bi)),
+#     proc = mean(proc_size2, na.rm = T),
+#     surv = sum(cop_dead_13dpe, na.rm = T)/sum(!is.na(cop_dead_13dpe)),
+#     fail = sum(failed_devo_bi, na.rm = T)/sum(!is.na(failed_devo_bi)),
+#     finf = sum(schisto_inf, na.rm = T)/sum(!is.na(schisto_inf)),
+#     fsurv = sum(fish_surv, na.rm = T)/sum(!is.na(fish_surv)),
+#     pler = mean(log_ww, na.rm = T),
+#     liver = mean(log_liver, na.rm = T),
+#     fgrow = mean(fish_final_bm_g_noworm, na.rm = T),
+#     bred = mean(log_eggs, na.rm = T)
+#   )%>%
+#   mutate(
+#     cerc = if_else(cerc == 0, 0.01, cerc),
+#     surv = if_else(surv == 0, 0.01, surv),
+#     fail = if_else(fail == 0, 0.01, fail),
+#     fsurv = if_else(fsurv == 0, 0.01, fsurv),
+#     finf = if_else(finf == 0, 0.01, 
+#                    if_else(finf == 1, 0.99, finf))
+#   )%>%
+#   mutate(
+#     # corrected fam avgs
+#     c_cinf = qnorm(cinf) - p_cinf,
+#     c_cerc = qnorm(cerc) - p_cerc,
+#     c_proc = proc - p_proc,
+#     c_fail = qnorm(fail) - p_fail,
+#     c_surv = qnorm(surv) - p_surv,
+#     c_finf = qnorm(finf) - p_finf,
+#     c_fsurv = qnorm(fsurv) - p_fsurv,
+#     c_pler = pler - p_pler,
+#     c_liver = liver - p_liver,
+#     c_fgrow = fgrow - p_fgrow,
+#     c_bred = bred - p_bred
+#   )%>%
+#   ungroup()
+```
+
+
+
+```{r}
+target_samples <- 2500
+burnin_mult <- 1000
+```
+
+Now, let's move on to fitting the bivariate models. With 11 traits, there are 55 unique pairs. We start with copepod infection rate.
+
+# Copepod infection vs...
+
+Parasite traits could only be measured in individuals that infected copepods. Thus, residual covariance between copepod infection and other traits cannot be estimated. The variance for infection rate was fixed at 1. Copepod infection was one of the only traits that exhibited some variation between parental worms within clutches. Thus, "dam" variance was included for copepod infection rate in the bivariate models.
+
+## Cercomere presence
+
+Cercomere presence also exhibited dam-level variation, so we can examine whether dams with high infection rates were more likely to have cercomeres 9 dpi.
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_cerc <- MCMCglmm(
+  cbind(cop_inf, cerc_bi) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cinf_cerc)
+```
+
+```{r}
+re <- colMeans(cinf_cerc$Sol[,which(grepl("\\.", colnames(cinf_cerc$Sol)))])
+re <- data.frame(
+  trait = unlist(
+    lapply(strsplit(gsub(pattern="trait", "", x = names(re)), split = "\\."), FUN = function(x) {x[[1]]})
+    ),
+  re = unlist(
+    lapply(strsplit(gsub(pattern="trait", "", x = names(re)), split = "\\."), FUN = function(x) {x[[2]]})
+    ),
+  re_level = unlist(
+    lapply(strsplit(gsub(pattern="trait", "", x = names(re)), split = "\\."), FUN = function(x) {x[[3]]})
+    ),
+  re_avg = re
+  )
+
+re_cinf_cerc <- re%>%
+  pivot_wider(names_from = trait, values_from = re_avg)
+re_cinf_cerc <- left_join(re_cinf_cerc,
+                          bind_rows(
+                            select(dat, re_level = cop_block, gen)%>%distinct()%>%na.omit(),
+                            select(dat, re_level = worm_full_sib_fam_id, gen, line)%>%distinct(),
+                            select(dat, re_level = dam, gen, line)%>%distinct()%>%na.omit(),
+                          ),
+                          by = "re_level")
+
+```
+
+
+```{r}
+fast_fams <- re_cinf_cerc%>%filter(re == "worm_full_sib_fam_id", gen>0, line=="fast")%>%.$re_level
+slow_fams <- re_cinf_cerc%>%filter(re == "worm_full_sib_fam_id", gen>0, line=="slow")%>%.$re_level
+cntl_fams <- re_cinf_cerc%>%filter(re == "worm_full_sib_fam_id", gen>0, line=="control")%>%.$re_level
+```
+
+```{r}
+cowplot::plot_grid(
+  ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0),
+       aes(cop_inf, color = line)) + 
+    scale_color_manual(values = c("black", "red", "blue")) +
+    geom_density() +
+    facet_wrap(~gen) +
+    guides(color="none"),
+  ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0),
+       aes(cop_inf, color = line)) + 
+    scale_color_manual(values = c("black", "red", "blue")) +
+    geom_density()
+)
+```
+```{r}
+print("control")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcop_inf.worm_full_sib_fam_id.", cntl_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+print("fast")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcop_inf.worm_full_sib_fam_id.", fast_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+print("slow")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcop_inf.worm_full_sib_fam_id.", slow_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+```
+
+
+```{r}
+cowplot::plot_grid(
+  ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0),
+       aes(cerc_bi, color = line)) + 
+    scale_color_manual(values = c("black", "red", "blue")) +
+    geom_density() +
+    facet_wrap(~gen) +
+    guides(color="none"),
+  ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0),
+       aes(cerc_bi, color = line)) + 
+    scale_color_manual(values = c("black", "red", "blue")) +
+    geom_density()
+)
+```
+```{r}
+print("control")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcerc_bi.worm_full_sib_fam_id.", cntl_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+print("fast")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcerc_bi.worm_full_sib_fam_id.", fast_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+print("slow")
+quantile(
+  apply(
+    cinf_cerc$Sol[,paste0("traitcerc_bi.worm_full_sib_fam_id.", slow_fams)],
+    1,
+    e1071::skewness
+    ),
+  probs = c(0.025, 0.5, 0.975)
+)
+```
+
+```{r}
+ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0),
+       aes(cerc_bi, cop_inf)) +
+  geom_point(aes(color = line)) +
+  # geom_smooth(aes(color = line), se = F, method = lm) +
+  geom_abline(intercept = 0,
+              slope = mean(
+                cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.worm_full_sib_fam_id"]/
+                  (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+                )
+              ) +
+  geom_smooth(linetype = "dashed", se = F) +
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+```{r}
+dx <- data.frame(
+  cerc_bi = seq(re_cinf_cerc%>%filter(re == "worm_full_sib_fam_id", gen>0)%>%.$cerc_bi%>%min,
+                re_cinf_cerc%>%filter(re == "worm_full_sib_fam_id", gen>0)%>%.$cerc_bi%>%max,
+                length.out=50))
+dx <- dx%>%
+  mutate(pred = mean(cinf_cerc$Sol[,"traitcop_inf"]) + cerc_bi * 
+           mean(
+             cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.worm_full_sib_fam_id"]/
+               (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+             )
+         )%>%
+  mutate(pred_untrans = pnorm(cerc_bi))
+dx
+ggplot(re_cinf_cerc%>%
+         filter(re == "worm_full_sib_fam_id", gen>0)%>%
+         mutate(cerc_bi = pnorm(cerc_bi+mean(cinf_cerc$Sol[,"traitcerc_bi"])),
+                cop_inf = pnorm(cop_inf+mean(cinf_cerc$Sol[,"traitcop_inf"]))),
+       aes(cerc_bi, cop_inf)) +
+  geom_point(aes(color = line)) +
+  # geom_smooth(aes(color = line), se = F, method = lm) +
+  geom_line(data=dx, aes(pnorm(cerc_bi), pnorm(pred))) +
+  # geom_abline(intercept = 0, 
+  #             slope = mean(
+  #               cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.worm_full_sib_fam_id"]/
+  #                 (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.worm_full_sib_fam_id"])
+  #               )
+  #             ) +
+  # geom_smooth(linetype = "dashed", se = F) +
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+```{r}
+ggplot(re_cinf_cerc%>%
+         filter(re == "cop_block"),
+       aes(cerc_bi, cop_inf)) +
+  geom_point(aes(color = factor(gen))) +
+  geom_abline(intercept = 0, 
+              slope = mean(
+                cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.cop_block"]/
+                  (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.cop_block"])
+                )
+              ) +
+  geom_smooth(linetype = "dashed", se = F) 
+  scale_color_manual(values = c("black", "red", "blue"))
+
+```
+```{r}
+ggplot(re_cinf_cerc%>%
+         filter(re == "cop_block"),
+       aes(cerc_bi, cop_inf)) +
+  geom_point(aes(color = factor(gen))) +
+  geom_abline(intercept = 0, 
+              slope = mean(
+                cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.cop_block"]/
+                  (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.cop_block"])
+                )
+              ) +
+  geom_smooth(linetype = "dashed", se = F) 
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+```{r}
+ggplot(re_cinf_cerc%>%
+         filter(re == "dam"),
+       aes(cerc_bi, cop_inf)) +
+  geom_point(aes(color = line)) +
+  geom_abline(intercept = 0, 
+              slope = mean(
+                cinf_cerc$VCV[,"traitcop_inf:traitcerc_bi.dam"]/
+                  (cinf_cerc$VCV[,"traitcerc_bi:traitcerc_bi.dam"])
+                )
+              ) +
+  geom_smooth(linetype = "dashed", se = F) 
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+
+
+```{r}
+get_corr_biv_mcmcmodel <- function(model, correlation){
+  # input is MCMCglmm model and the correlation we want, e.g. worm_full_sib_fam_id, units, etc.
+  # output is correlation and it CI
+  e_cols <- which(grepl(correlation, colnames(model$VCV)))
+  sx <- summary(
+    model$VCV[,e_cols[2]]/
+    sqrt(model$VCV[,e_cols[1]] * model$VCV[,e_cols[4]])
+  )
+  return(sx)
+}
+
+corr_biv_to_df <- function(mcmc_cor, trait1_name, trait2_name, cor_name){
+  # take in output from get_corr_biv_mcmcmmodel, and trait names
+  # return data frame with the correlation
+  quants <- mcmc_cor$quantiles
+  names(quants) <- NULL
+  df <- data.frame(
+    trait1 = trait1_name,
+    trait2 = trait2_name, 
+    v_name = cor_name,
+    cor = quants[3], cor_lwr = quants[1], cor_upr = quants[5]
+    )
+  return(df)
+}
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_cerc, "cop_block")
+sx
+cinf_cor <- corr_biv_to_df(sx, "cinf", "cerc", "Ve")
+```
+
+Here is the genetic correlation - families with high infection rates also had faster larval development.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_cerc, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "cerc", "Vg"))
+```
+
+Here is the dam correlation - it is positive but not quite significant.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_cerc, "dam")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "cerc", "Vm"))
+```
+
+## Procercoid size
+
+Procercoid size was measured 13 dpi. We also fit a 'dam' covariance here, even though procercoid size varied less among dams than cercomere presence.
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_proc <- MCMCglmm(
+  cbind(proc_scl, cop_inf) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cinf_proc)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_proc, "cop_block")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "proc", "Ve"))
+```
+
+Here is the genetic correlation - families with higher infection rates also had larger procercoids.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_proc, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "proc", "Vg"))
+```
+
+Here is the dam correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_proc, "dam")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "proc", "Vm"))
+```
+
+## Failed development
+
+A small portion of parasites were not fully developed after 13 days in copepods, e.g. they had not grown or lacked a cercomere. They were scored as "failed". Because the vast majority of parasites did not "fail", most 'maternal' parasites did not have any offspring that 'failed' development. In other words, it is hard to estimate a variance component for dams. Thus, we did not include 'dam' variance for this trait.
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_fail <- MCMCglmm(
+  cbind(cop_inf, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cinf_fail)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_fail, "cop_block")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "fail", "Ve"))
+```
+
+Here is the genetic correlation - families with higher infection rates were more likely to succesfully complete development.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_fail, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "fail", "Vg"))
+```
+
+## Copepod survival
+
+We recorded whether copepods were still alive 13 dpi. We estimated environmental, genetic, and parental covariances between infection rate and copepod survival. We limited observations on survival to only infected copepods.
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_surv <- MCMCglmm(
+  cbind(cop_inf, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cinf_surv)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_surv, "cop_block")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "surv", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_surv, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "surv", "Vg"))
+```
+
+Here is the dam correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_surv, "dam")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "surv", "Vm"))
+```
+
+## Fish infection rate
+
+For fish infection rates, we look at environmental (copepod block) and genetic (families) covariances. We did not consider dam variance, because there were relatively few worms per dam within clutches. Further, there was little variance among dams in the univariate model for fish infection. In fact, for all fish-level traits, dam variance was low, so we did not include it for any traits from fish.
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_finf <- MCMCglmm(
+  cbind(cop_inf, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # cinf model
+    at.level(trait, 1):cop_stage_checking +
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cinf_finf)
+```
+
+Here is the correlation across copepod blocks. Some blocks had higher infection rates in both hosts, but the CI was wide.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_finf, "cop_block")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "finf", "Ve"))
+```
+
+Here is the genetic correlation
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_finf, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "finf", "Vg"))
+```
+
+## Fish survival
+
+Fish survival was recorded haphazardly; we did not record exactly when the fish died. This is just a measure of whether fish survived until dissection.
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_fsurv <- MCMCglmm(
+  cbind(cop_inf, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # cinf model
+    at.level(trait, 1):cop_stage_checking +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  pr = T,
+  verbose = TRUE, 
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cinf_fsurv)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_fsurv, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "fsurv", "Vg"))
+```
+
+## Plerocercoid mass
+
+Worms recovered from dissected fish were weighed.
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_pler <- MCMCglmm(
+  cbind(log_ww_scl, cop_inf) ~ 
+    trait-1 + trait:ib + 
+    # cinf model
+    at.level(trait, 2):cop_stage_checking +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  pr = T,
+  verbose = TRUE, 
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cinf_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_pler, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "pler", "Vg"))
+```
+
+## Liver mass
+
+For fish that survived until dissection, we recorded liver weight as a proxy for condition.
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_liver <- MCMCglmm(
+  cbind(log_liver_scl, cop_inf) ~ 
+    trait-1 + trait:ib + 
+    # cinf model
+    at.level(trait, 2):cop_stage_checking +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cinf_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_liver, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "liver", "Vg"))
+```
+
+## Fish growth
+
+Fish size before exposure and at dissection was recorded.
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, cop_inf) ~ 
+    trait-1 + trait:ib + 
+    # cinf model
+    at.level(trait, 2):cop_stage_checking +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cinf_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_fgrow, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "fgrow", "Vg"))
+```
+
+## Fecundity
+
+Egg production was measured. Plerocercoids were placed in pairs into breeding medium. After ~48 hrs, they were separated so that the eggs could be collected from identifiable parents (the worms are simultaenous hermaphrodites so the eggs in pairs cannot be assigned to a maternal worm). Thus, fecundity represents the total egg production by an individual from 2 to 7 day post incubation.
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cinf_eggs <- MCMCglmm(
+  cbind(eggs_scl, cop_inf) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cinf_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cinf_eggs, "worm_full_sib_fam_id")
+sx
+cinf_cor <- bind_rows(cinf_cor, 
+                      corr_biv_to_df(sx, "cinf", "eggs", "Vg"))
+```
+
+Here are the genetic correlations between copepod infection rate and the other traits. The positive correlations suggest that families likely to infect copepods are also likely to grow and develop well in them. Note that "fail" is the probability of successful development.
+
+```{r}
+ggplot(cinf_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("cerc", "proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+Here are the environmental and maternal covariances. None are clearly significant.
+
+```{r}
+ggplot(cinf_cor%>%
+         filter(v_name != "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("cerc", "proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+Moving on to the second trait and the one we selected upon, larval development.
+
+# Cercomere presence vs...
+
+For all models with cercomere presence, we include 'parental' effects, since cercomere development could differ among 'dams'.
+
+## Procercoid size
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_proc <- MCMCglmm(
+  cbind(proc_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cerc_proc)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_proc, "cop_block")
+sx
+cerc_cor <- corr_biv_to_df(sx, "cerc", "proc", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_proc, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, 
+                      corr_biv_to_df(sx, "cerc", "proc", "Vg"))
+```
+
+Here is the dam correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_proc, "dam")
+sx
+cerc_cor <- bind_rows(cerc_cor, 
+                      corr_biv_to_df(sx, "cerc", "proc", "Vm"))
+```
+
+Here is the residual correlation - all else equal, worms that develop faster than expected also grow larger.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_proc, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, 
+                      corr_biv_to_df(sx, "cerc", "proc", "Vr"))
+```
+
+## Failed development
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_fail <- MCMCglmm(
+  cbind(cerc_bi, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cerc_fail)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fail, "cop_block")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fail", "Ve"))
+```
+
+Here is the genetic correlation - as expected failure occurs more in families less likely to have a cercomer 9 dpi.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fail, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fail", "Vg"))
+```
+
+## Copepod survival
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_surv <- MCMCglmm(
+  cbind(cerc_bi, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ corg(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cerc_surv)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_surv, "cop_block")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "surv", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_surv, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "surv", "Vg"))
+```
+
+Here is the dam correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_surv, "dam")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "surv", "Vm"))
+```
+
+Here is the residual correlation - we could fit a residual correlation because worms with and without cercomeres did and did not die before 13 dpi. The positive correlation implies that copepods with worms with cercomeres were more likely to survive.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_surv, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "surv", "Vr"))
+```
+
+A simple proportion table shows that survival rates were slightly higher for copepods with worms that had cercomeres 9 dpi.
+
+```{r}
+with(dat_multi, prop.table(table(cerc_bi, cop_surv_13dpe), margin = 1))
+```
+
+## Fish infection rate
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_finf <- MCMCglmm(
+  cbind(cerc_bi, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # cerc model
+    at.level(trait, 1):cop_stage_checking +
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 1)):dam,
+  rcov = ~ corg(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cerc_finf)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_finf, "cop_block")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "finf", "Ve"))
+```
+
+Here is the genetic correlation - fast-developing families were more likely to infect fish:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_finf, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "finf", "Vg"))
+```
+
+Here is the residual correlation; all else equal, worms with cercomeres were more likely to infect fish.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_finf, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "finf", "Vr"))
+```
+
+## Fish survival
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_fsurv <- MCMCglmm(
+  cbind(cerc_bi, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # cerc model
+    at.level(trait, 1):cop_stage_checking +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 1)):dam,
+  rcov = ~ corg(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(cerc_fsurv)
+```
+
+Here is the genetic correlation. Fast-developing families were more likely to kill fish:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fsurv, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fsurv", "Vg"))
+```
+
+Here is the residual correlation.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fsurv, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fsurv", "Vr"))
+```
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_pler <- MCMCglmm(
+  cbind(log_ww_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # cerc model
+    at.level(trait, 2):cop_stage_checking +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cerc_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_pler, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "pler", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_pler, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "pler", "Vr"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_liver <- MCMCglmm(
+  cbind(log_liver_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # cerc model
+    at.level(trait, 2):cop_stage_checking +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cerc_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_liver, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "liver", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_liver, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "liver", "Vr"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # cerc model
+    at.level(trait, 2):cop_stage_checking +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(cerc_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fgrow, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fgrow", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_fgrow, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "fgrow", "Vr"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+cerc_eggs <- MCMCglmm(
+  cbind(eggs_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  # data = dat_multi%>%filter(id!=3983), # removes outlier,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+cerc_eggs_no_outlier <- MCMCglmm(
+  cbind(eggs_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi%>%filter(id!=3983), # removes outlier,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = F,
+  nitt = thin_mult * 500 + burnin_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+cerc_eggs_ww <- MCMCglmm(
+  cbind(eggs_scl, cerc_bi) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_ww_cen,
+  data = dat_multi%>%
+    mutate(log_ww_cen = log_ww - log(mean(dat_bred$worm_bm_mg, na.rm = T)))%>%
+    mutate(log_ww_cen = if_else(is.na(log_ww_cen), 0, log_ww_cen)),
+  # data = dat_multi%>%filter(id!=3983), # removes outlier,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    idh(at.level(trait, 2)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+# second model - trivariate to better understand correlations between cerc, growth, fecundity
+# cerc_eggs_pler <- MCMCglmm(
+#   cbind(eggs_scl, log_ww_scl, cerc_bi) ~ 
+#     trait-1 + trait:ib + 
+#     # proc model
+#     at.level(trait, 3):cop_stage_checking +
+#     # pler model
+#     at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+#     at.level(trait, "log_ww_scl"):fish_sex_cen + 
+#     at.level(trait, "log_ww_scl"):age_diss_cen +
+#     # eggs model
+#     at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+#     at.level(trait, "eggs_scl"):fish_sex_cen + 
+#     at.level(trait, "eggs_scl"):age_diss_cen,
+#   data = dat_multi,
+#   # data = dat_multi%>%filter(id!=3983), # removes outlier,
+#   random = ~ 
+#     us(at.level(trait, 3)):cop_block +
+#     us(at.level(trait, 2)):tank_id +
+#     us(at.level(trait, 1)):breeding_block +
+#     us(trait):worm_full_sib_fam_id +
+#     idh(at.level(trait, 3)):dam,
+#   rcov = ~ us(trait):units,
+#   # ginverse = list(id = Ainv),
+#   family = c("gaussian", "gaussian", "threshold"),
+#   prior = 
+#     list(
+#       R = list(
+#         R1 = list(V = diag(3), nu = 3, fix=3)), # fix var for binary trait
+#       G = list(
+#         G1 = list(V = diag(1), nu = 1), # cop block
+#         G2 = list(V = diag(1), nu = 1), # tank
+#         G3 = list(V = diag(1), nu = 1), # breeding block
+#         G4 = list(V = diag(3), nu = 3), # pedigree
+#         G5 = list(V = diag(1), nu = 1) # parental
+#         )
+#       ), 
+#   verbose = TRUE, 
+#   nitt = 5000, # nit_mult, 
+#   thin = thin_mult,
+#   burnin = burnin_mult
+#   )
+```
+
+```{r}
+summary(cerc_eggs)
+```
+
+Here is the genetic correlation - families with faster development produced more eggs.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_eggs, "worm_full_sib_fam_id")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "eggs", "Vg"))
+```
+
+The residual correlation goes in the opposite direction.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(cerc_eggs, "units")
+sx
+cerc_cor <- bind_rows(cerc_cor, corr_biv_to_df(sx, "cerc", "eggs", "Vr"))
+```
+
+Here are the estimated genetic correlations between cercomere presence and the other traits.
+
+```{r}
+ggplot(cerc_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+Here are the other covariances with cercomere presence. Residual covariances were often significant, perhaps suggesting a role for individual copepod "quality". 
+
+```{r}
+ggplot(cerc_cor%>%
+         filter(v_name != "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x", ncol = 2) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+# Procercoid size vs...
+
+## Failed development
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_fail <- MCMCglmm(
+  cbind(proc_scl, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(proc_fail)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fail, "cop_block")
+sx
+proc_cor <- corr_biv_to_df(sx, "proc", "fail", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fail, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "fail", "Vg"))
+```
+
+## Copepod survival
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_surv <- MCMCglmm(
+  cbind(proc_scl, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(trait):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(2), nu = 2) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(proc_surv)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_surv, "cop_block")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "surv", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_surv, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "surv", "Vg"))
+```
+
+Here is the dam correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_surv, "dam")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "surv", "Vm"))
+```
+
+## Fish infection rate
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_finf <- MCMCglmm(
+  cbind(proc_scl, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(proc_finf)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_finf, "cop_block")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "finf", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_finf, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "finf", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_finf, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "finf", "Vr"))
+```
+
+## Fish survival
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_fsurv <- MCMCglmm(
+  cbind(proc_scl, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix=2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank_id
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(proc_fsurv)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fsurv, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "fsurv", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fsurv, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "fsurv", "Vr"))
+```
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_pler <- MCMCglmm(
+  cbind(proc_scl, log_ww_scl) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank_id
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(proc_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_pler, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "pler", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_pler, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "pler", "Vr"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_liver <- MCMCglmm(
+  cbind(proc_scl, log_liver_scl) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank_id
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(proc_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_liver, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "liver", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_liver, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "liver", "Vr"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_fgrow <- MCMCglmm(
+  cbind(proc_scl, fish_final_bm_just_inf) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank_id
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(proc_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fgrow, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "fgrow", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_fgrow, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "fgrow", "Vr"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+proc_eggs <- MCMCglmm(
+  cbind(proc_scl, eggs_scl) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, "proc_scl"):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # breeding block
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(proc_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_eggs, "worm_full_sib_fam_id")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "eggs", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(proc_eggs, "units")
+sx
+proc_cor <- bind_rows(proc_cor, corr_biv_to_df(sx, "proc", "eggs", "Vr"))
+```
+
+Procercoid size was genetically correlated with the probability of successfully completing development.
+
+```{r}
+ggplot(proc_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+All else equal, larger procercoids were more likely to infect fish and to grow to large plerocercoids.
+
+```{r}
+ggplot(proc_cor%>%
+         filter(v_name != "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free", ncol = 2) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Failed development vs...
+
+## Copepod survival
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_surv <- MCMCglmm(
+  cbind(nofailed_devo_bi, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + trait:cop_stage_checking,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # parental
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(fail_surv)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_surv, "cop_block")
+sx
+fail_cor <- corr_biv_to_df(sx, "fail", "surv", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_surv, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "surv", "Vg"))
+```
+
+## Fish infection rate
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_finf <- MCMCglmm(
+  cbind(nofailed_devo_bi, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # fail model
+    at.level(trait, 1):cop_stage_checking +
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(fail_finf)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_finf, "cop_block")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "finf", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_finf, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "finf", "Vg"))
+```
+
+## Fish survival
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_fsurv <- MCMCglmm(
+  cbind(nofailed_devo_bi, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # fail model
+    at.level(trait, 1):cop_stage_checking +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(fail_fsurv)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_fsurv, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "fsurv", "Vg"))
+```
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_pler <- MCMCglmm(
+  cbind(log_ww_scl, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + 
+    # fail model
+    at.level(trait, 2):cop_stage_checking +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fail_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_pler, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "pler", "Vg"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_liver <- MCMCglmm(
+  cbind(log_liver_scl, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + 
+    # fail model
+    at.level(trait, 2):cop_stage_checking +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fail_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_liver, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "liver", "Vg"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 50
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + 
+    # fail model
+    at.level(trait, 2):cop_stage_checking +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fail_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_fgrow, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "fgrow", "Vg"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fail_eggs <- MCMCglmm(
+  cbind(eggs_scl, nofailed_devo_bi) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(fail_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fail_eggs, "worm_full_sib_fam_id")
+sx
+fail_cor <- bind_rows(fail_cor, corr_biv_to_df(sx, "fail", "eggs", "Vg"))
+```
+
+Succesful development was associated with higher infection rates in fish and more eggs across families.
+
+```{r}
+ggplot(fail_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+Blocks with higher/lower failure rates were not associated with higher infection rates in fish or copepod survival.
+
+```{r}
+ggplot(fail_cor%>%
+         filter(v_name != "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x", ncol = 2) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Copepod survival vs...
+
+## Fish infection rate
+
+```{r}
+thin_mult <- 20
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_finf <- MCMCglmm(
+  cbind(cop_surv_13dpe, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # surv model
+    at.level(trait, 1):cop_stage_checking +
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct,
+  data = dat_multi,
+  random = ~ 
+    us(trait):cop_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # cop block
+        G2 = list(V = diag(2), nu = 2), # pedigree
+        G3 = list(V = diag(1), nu = 1) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(surv_finf)
+```
+
+Here is the correlation across copepod blocks:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_finf, "cop_block")
+sx
+surv_cor <- corr_biv_to_df(sx, "surv", "finf", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_finf, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "finf", "Vg"))
+```
+
+## Fish survival
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_fsurv <- MCMCglmm(
+  cbind(cop_surv_13dpe, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # surv model
+    at.level(trait, 1):cop_stage_checking +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 1)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(surv_fsurv)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_fsurv, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "fsurv", "Vg"))
+```
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_pler <- MCMCglmm(
+  cbind(log_ww_scl, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + 
+    # surv model
+    at.level(trait, 2):cop_stage_checking +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(surv_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_pler, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "pler", "Vg"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_liver <- MCMCglmm(
+  cbind(log_liver_scl, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + 
+    # surv model
+    at.level(trait, 2):cop_stage_checking +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(surv_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_liver, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "liver", "Vg"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + 
+    # surv model
+    at.level(trait, 2):cop_stage_checking +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G2 = list(V = diag(1), nu = 1) # dam
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(surv_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_fgrow, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "fgrow", "Vg"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+surv_eggs <- MCMCglmm(
+  cbind(eggs_scl, cop_surv_13dpe) ~ 
+    trait-1 + trait:ib + 
+    # proc model
+    at.level(trait, 2):cop_stage_checking +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id +
+    us(at.level(trait, 2)):dam,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2), # pedigree
+        G4 = list(V = diag(1), nu = 1) # tank
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(surv_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(surv_eggs, "worm_full_sib_fam_id")
+sx
+surv_cor <- bind_rows(surv_cor, corr_biv_to_df(sx, "surv", "eggs", "Vg"))
+```
+
+There was little genetic variation in infected copepod survival, so none of the genetic correlations were significant.
+
+```{r}
+ggplot(surv_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Fish infection rate vs...
+
+## Fish survival
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+finf_fsurv <- MCMCglmm(
+  cbind(schisto_inf, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # finf model
+    at.level(trait, 1):fish_initial_bm_cen + 
+    at.level(trait, 1):fish_sex_cen + 
+    at.level(trait, 1):fish_exp_on_cop_dpe_fct +
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):cop_block +
+    us(at.level(trait, 2)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("threshold", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 1)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(finf_fsurv)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(finf_fsurv, "worm_full_sib_fam_id")
+sx
+finf_cor <- corr_biv_to_df(sx, "finf", "fsurv", "Vg")
+```
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+finf_pler <- MCMCglmm(
+  cbind(log_ww_scl, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(finf_pler)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(finf_pler, "worm_full_sib_fam_id")
+sx
+finf_cor <- bind_rows(finf_cor, corr_biv_to_df(sx, "finf", "pler", "Vg"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+finf_liver <- MCMCglmm(
+  cbind(log_liver_scl, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(finf_liver)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(finf_liver, "worm_full_sib_fam_id")
+sx
+finf_cor <- bind_rows(finf_cor, corr_biv_to_df(sx, "finf", "liver", "Vg"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+finf_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(finf_fgrow)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(finf_fgrow, "worm_full_sib_fam_id")
+sx
+finf_cor <- bind_rows(finf_cor, corr_biv_to_df(sx, "finf", "fgrow", "Vg"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+finf_eggs <- MCMCglmm(
+  cbind(eggs_scl, schisto_inf) ~ 
+    trait-1 + trait:ib + 
+    # finf model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen + 
+    at.level(trait, 2):fish_exp_on_cop_dpe_fct +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):cop_block +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # cop block
+        G2 = list(V = diag(1), nu = 1), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(finf_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(finf_eggs, "worm_full_sib_fam_id")
+sx
+finf_cor <- bind_rows(finf_cor, corr_biv_to_df(sx, "finf", "eggs", "Vg"))
+```
+
+Heritability of fish infection rate was low, so there were not clear genetic correlations.
+
+```{r}
+ggplot(finf_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("fsurv", "pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Fish survival vs...
+
+## Plerocercoid mass
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fsurv_pler <- MCMCglmm(
+  cbind(log_ww_scl, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen +
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fsurv_pler)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_pler, "tank_id")
+sx
+fsurv_cor <- corr_biv_to_df(sx, "fsurv", "pler", "Ve")
+```
+
+Here is the genetic correlation - large worms were associated with lower host survival.
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_pler, "worm_full_sib_fam_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "pler", "Vg"))
+```
+
+## Liver mass
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fsurv_liver <- MCMCglmm(
+  cbind(log_liver_scl, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fsurv_liver)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_liver, "tank_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "liver", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_liver, "worm_full_sib_fam_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "liver", "Vg"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fsurv_fgrow <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fsurv_fgrow)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_fgrow, "tank_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "fgrow", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_fgrow, "worm_full_sib_fam_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "fgrow", "Vg"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fsurv_eggs <- MCMCglmm(
+  cbind(eggs_scl, fish_surv75) ~ 
+    trait-1 + trait:ib + 
+    # fsurv model
+    at.level(trait, 2):fish_initial_bm_cen + 
+    at.level(trait, 2):fish_sex_cen +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 2)):tank_id +
+    us(at.level(trait, 1)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ idh(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "threshold"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2, fix = 2)), # fix var for binary trait
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # tank
+        G2 = list(V = diag(1), nu = 1), # breeding block
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+```{r}
+summary(fsurv_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fsurv_eggs, "worm_full_sib_fam_id")
+sx
+fsurv_cor <- bind_rows(fsurv_cor, corr_biv_to_df(sx, "fsurv", "eggs", "Vg"))
+```
+
+Here are the genetic correlations:
+
+```{r}
+ggplot(fsurv_cor%>%
+         filter(v_name == "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+Here are the tank-level correlations. High survival was associated with smaller worms, smaller livers, and less growth.
+
+```{r}
+ggplot(fsurv_cor%>%
+         filter(v_name != "Vg")%>%
+         mutate(trait2 = factor(trait2, levels = c("pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  # facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Plerocercoid mass vs...
+
+## Liver mass
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+pler_liver <- MCMCglmm(
+  cbind(log_ww_scl, log_liver_scl) ~ 
+    trait-1 + trait:ib + 
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen +
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank_id
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(pler_liver)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_liver, "tank_id")
+sx
+pler_cor <- corr_biv_to_df(sx, "pler", "liver", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_liver, "worm_full_sib_fam_id")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "liver", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_liver, "units")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "liver", "Vr"))
+```
+
+## Fish growth
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+pler_fgrow <- MCMCglmm(
+  cbind(log_ww_scl, fish_final_bm_just_inf) ~ 
+    trait-1 + trait:ib + 
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)),  
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank_id
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(pler_fgrow)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_fgrow, "tank_id")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "fgrow", "Ve"))
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_fgrow, "worm_full_sib_fam_id")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "fgrow", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_fgrow, "units")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "fgrow", "Vr"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+pler_eggs <- MCMCglmm(
+  cbind(log_ww_scl, eggs_scl) ~ 
+    trait-1 + trait:ib + 
+    # pler model
+    at.level(trait, "log_ww_scl"):fish_initial_bm_cen + 
+    at.level(trait, "log_ww_scl"):fish_sex_cen + 
+    at.level(trait, "log_ww_scl"):age_diss_cen +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):tank_id +
+    us(at.level(trait, 2)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # tank block
+        G2 = list(V = diag(1), nu = 1), # breeding block
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(pler_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_eggs, "worm_full_sib_fam_id")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "eggs", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(pler_eggs, "units")
+sx
+pler_cor <- bind_rows(pler_cor, corr_biv_to_df(sx, "pler", "eggs", "Vr"))
+```
+
+There are clear tank-level and residual correlations, but these are not genetically determined. 
+
+```{r}
+ggplot(pler_cor%>%
+         mutate(trait2 = factor(trait2, levels = c("pler", "liver", "fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+# Liver mass vs...
+
+## Fish growth
+
+```{r}
+thin_mult <- 40
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+liver_fgrow <- MCMCglmm(
+  cbind(log_liver_scl, fish_final_bm_just_inf) ~ 
+    trait-1 + trait:ib + 
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen +
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(trait):tank_id +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)),  
+      G = list(
+        G1 = list(V = diag(2), nu = 2), # tank_id
+        G2 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE,
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(liver_fgrow)
+```
+
+Here is the tank correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(liver_fgrow, "tank_id")
+sx
+liver_cor <- corr_biv_to_df(sx, "liver", "fgrow", "Ve")
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(liver_fgrow, "worm_full_sib_fam_id")
+sx
+liver_cor <- bind_rows(liver_cor, corr_biv_to_df(sx, "liver", "fgrow", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(liver_fgrow, "units")
+sx
+liver_cor <- bind_rows(liver_cor, corr_biv_to_df(sx, "liver", "fgrow", "Vr"))
+```
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+liver_eggs <- MCMCglmm(
+  cbind(log_liver_scl, eggs_scl) ~ 
+    trait-1 + trait:ib + 
+    # liver model
+    at.level(trait, "log_liver_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "log_liver_scl"):fish_sex_cen + 
+    at.level(trait, "log_liver_scl"):age_diss_cen +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):tank_id +
+    us(at.level(trait, 2)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), # 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # tank block
+        G2 = list(V = diag(1), nu = 1), # breeding block
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(liver_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(liver_eggs, "worm_full_sib_fam_id")
+sx
+liver_cor <- bind_rows(liver_cor, corr_biv_to_df(sx, "liver", "eggs", "Vg"))
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(liver_eggs, "units")
+sx
+liver_cor <- bind_rows(liver_cor, corr_biv_to_df(sx, "liver", "eggs", "Vr"))
+```
+
+```{r}
+ggplot(liver_cor%>%
+         mutate(trait2 = factor(trait2, levels = c("fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+
+# Fish growth vs...
+
+## Fecundity
+
+```{r}
+thin_mult <- 100
+nit_mult <- thin_mult * target_samples + burnin_mult
+
+fgrow_eggs <- MCMCglmm(
+  cbind(fish_final_bm_just_inf, eggs_scl) ~ 
+    trait-1 + trait:ib + 
+    # growth model
+    at.level(trait, "fish_final_bm_just_inf"):fish_initial_bm_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):fish_sex_cen + 
+    at.level(trait, "fish_final_bm_just_inf"):age_diss_cen +
+    # eggs model
+    at.level(trait, "eggs_scl"):log_fish_initial_bm_cen + 
+    at.level(trait, "eggs_scl"):fish_sex_cen + 
+    at.level(trait, "eggs_scl"):age_diss_cen,
+  data = dat_multi,
+  random = ~ 
+    us(at.level(trait, 1)):tank_id +
+    us(at.level(trait, 2)):breeding_block +
+    us(trait):worm_full_sib_fam_id,
+  rcov = ~ us(trait):units,
+  # ginverse = list(id = Ainv),
+  family = c("gaussian", "gaussian"),
+  prior = 
+    list(
+      R = list(
+        R1 = list(V = diag(2), nu = 2)), 
+      G = list(
+        G1 = list(V = diag(1), nu = 1), # tank block
+        G2 = list(V = diag(1), nu = 1), # breeding block
+        G3 = list(V = diag(2), nu = 2) # pedigree
+        )
+      ), 
+  verbose = TRUE, 
+  pr = T,
+  nitt = nit_mult, 
+  thin = thin_mult,
+  burnin = burnin_mult
+  )
+```
+
+```{r}
+summary(fgrow_eggs)
+```
+
+Here is the genetic correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fgrow_eggs, "worm_full_sib_fam_id")
+sx
+fgrow_cor <- corr_biv_to_df(sx, "fgrow", "eggs", "Vg")
+```
+
+Here is the residual correlation:
+
+```{r}
+sx <- get_corr_biv_mcmcmodel(fgrow_eggs, "units")
+sx
+fgrow_cor <- bind_rows(fgrow_cor, corr_biv_to_df(sx, "fgrow", "eggs", "Vr"))
+```
+
+```{r}
+ggplot(fgrow_cor%>%
+         mutate(trait2 = factor(trait2, levels = c("fgrow", "eggs")),
+                sig = if_else(cor_upr < 0 | cor_lwr > 0, "sig", "not sig")),
+       aes(x = trait2, y = cor, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(ymin = cor_lwr, ymax = cor_upr)) +
+  facet_wrap(~ v_name, scales = "free_x") +
+  theme(panel.grid.major.x = element_blank())
+```
+
+# E-, G-, M-, and R-matrices
+
+
+
+Now that we estimated correlations across traits, we can summarize them in plots. Let's make heat maps.
+
+```{r}
+# combine correlations from models
+biv_cor_comb <- bind_rows(
+  cinf_cor,
+  cerc_cor,
+  proc_cor,
+  fail_cor,
+  surv_cor,
+  finf_cor,
+  fsurv_cor,
+  pler_cor,
+  liver_cor,
+  fgrow_cor
+)
+```
+```{r}
+# take estimate of variance explained from univariate models
+uni_vc_comb <- bind_rows(
+  m_vc_comb%>%
+    filter(trait %in% c("cinf", "cerc", "surv", "proc"), mod == "3a_full_sibs", v_name != "Vf"),
+  m_vc_comb%>%
+    filter(!trait %in% c("cinf", "cerc", "surv", "proc"), mod == "2a_full_sibs", v_name != "Vf")
+)
+
+uni_vc_comb2 <- bind_rows(
+  m_vc_comb2%>%
+    filter(trait %in% c("cinf", "cerc", "surv", "proc"), mod == "3a_full_sibs"),
+  m_vc_comb2%>%
+    filter(!trait %in% c("cinf", "cerc", "surv", "proc"), mod == "2a_full_sibs")
+)
+
+uni_vc_comb2 <- uni_vc_comb2%>%
+  rename(v2_fit = v_fit, v2_lwr = v_lwr, v2_upr = v_upr)%>%
+  mutate(v_name = gsub("2", "", v_name))
+
+uni_vc_comb <- left_join(uni_vc_comb, 
+          select(uni_vc_comb2, - mod),
+          by = c("trait", "v_name"))
+
+uni_vc_comb <- uni_vc_comb%>%
+  rename(trait1 = trait)%>%
+  mutate(trait2 = trait1,
+         sig = if_else(v_name == "Vr", "", 
+                       if_else(v_lwr > 0.005, "*", "")), # vc sig if lower CI at least 1%
+         v_txt = case_when(
+           !is.na(v_fit) ~ paste0(as.character(round(v_fit, 2)), sig)),
+         v_txt2 = case_when(
+           !is.na(v_fit) ~ paste0(as.character(round(v_fit,2)), "/", as.character(round(v2_fit,2))))
+         )
+```
+```{r}
+biv_cor_comb <- bind_rows(biv_cor_comb, uni_vc_comb)
+```
+```{r}
+biv_cor_comb <- biv_cor_comb%>%
+  mutate(
+    trait1 = factor(trait1, levels = c(
+      "cinf", "cerc", "proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+    trait2 = factor(trait2, levels = c(
+      "cinf", "cerc", "proc", "fail", "surv", "finf", "fsurv", "pler", "liver", "fgrow", "eggs")),
+    sig = if_else(!is.na(sig), sig, if_else(cor_upr < 0 | cor_lwr > 0, "*", "")))%>%
+  mutate(cor_txt = case_when(!is.na(cor) ~ paste0(as.character(round(cor,2)), sig)),
+         cor_txt2 = case_when(!is.na(cor_lwr) ~ 
+                                paste0("[", as.character(round(cor_lwr,2)),
+                                       " - ", as.character(round(cor_upr,2)), "]"))
+         )
+```
+
+Here are the correlations among traits due to shared environments, the E-matrix. The value along the diagonal is the fraction of variance explained by the shared environment after accounting for starting conditions (like copepod stage or fish size). Boxes with a black border are those that were significantly different from zero. 
+
+```{r}
+max_min_cor_col <- max(abs(biv_cor_comb$cor%>%na.omit))
+
+ggplot(biv_cor_comb%>%
+         filter(v_name == "Ve")%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(aes(fill = cor)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Ve")%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "E-matrix", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+  scale_x_discrete(
+    position = "top",
+    labels = c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+```
+It may make more sense to look at copepod and fish environments separately. Here are the model-estimated correlations across copepod blocks. Several trends were positive, but none were significant.
+
+```{r}
+e_mat_copblock <- ggplot(biv_cor_comb%>%
+         filter(v_name == "Ve", 
+                trait1 %in% c("cinf", "cerc", "proc", "fail", "surv", "finf"),
+                trait2 %in% c("cinf", "cerc", "proc", "fail", "surv", "finf"))%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(aes(fill = cor)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Ve", 
+                trait1 %in% c("cinf", "cerc", "proc", "fail", "surv", "finf"),
+                trait2 %in% c("cinf", "cerc", "proc", "fail", "surv", "finf"))%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "E-matrix, copepod block", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+  scale_x_discrete(
+    position = "top",
+    labels = c("cinf", "cerc", "proc", "no fail", "csurv", "finf")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("cinf", "cerc", "proc", "no fail", "csurv", "finf"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+e_mat_copblock
+```
+
+We can also add scatterplots above the diagonal to demonstrate the trends.
+
+```{r}
+make_mat_plot <- function(x_var, y_var, random_effect_name, model, differentiate_lines){
+  
+  mx <- model$Sol
+  # extract and avg random effects from model
+  re1 <- apply(
+    mx[,grepl(paste0("trait",x_var,".",random_effect_name), colnames(mx))],
+    2,
+    mean)
+  re2 <- apply(
+    mx[,grepl(paste0("trait",y_var,".",random_effect_name), colnames(mx))],
+    2,
+    mean)
+  re_levels <- gsub(paste0("trait",x_var,".",random_effect_name,"."), "", x=names(re1)) 
+  
+  # extract var and cov for two traits
+  var_x <- mean(model$VCV[,paste0("trait", x_var, ":trait", x_var, ".", random_effect_name) ])
+  cov_xy <- mean(model$VCV[,paste0("trait", x_var, ":trait", y_var, ".", random_effect_name) ])
+  
+  # put into df for plotting
+  dx <- data_frame(x=re1, y=re2, re_levels)
+  # make plots with or without lines differentiated
+  if(differentiate_lines){
+    dx <- left_join(
+      dx,
+      select(dat_multi, gen, line, all_of(random_effect_name))%>%distinct(),
+      by = c("re_levels" = random_effect_name)
+      )
+    
+    px <- ggplot(dx, aes(x, y)) +
+      geom_point(aes(color = line), size = 0.05) +
+      geom_abline(intercept = 0, slope = cov_xy/var_x) +
+      # geom_smooth(se = F, color = "purple") +
+      theme(axis.title = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            panel.grid = element_blank(),
+            panel.border = element_rect(color = NA),
+            plot.background = element_rect(color = NA),
+            plot.margin = margin(0,0,0,0)) +
+      scale_color_manual(values = c("gray", "black", "red", "blue")) +
+      guides(color = "none")
+  } else {
+    dx <- left_join(
+      dx,
+      select(dat_multi, gen, all_of(random_effect_name))%>%distinct(),
+      by = c("re_levels" = random_effect_name))
+                  
+    px <- ggplot(dx, aes(x, y)) +
+      geom_point(size = 0.05, color = "gray") +
+      geom_abline(intercept = 0, slope = cov_xy/var_x) +
+      # geom_smooth(se = F, color = "purple") +
+      theme(axis.title = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            panel.grid = element_blank(),
+            panel.border = element_rect(color = NA),
+            plot.background = element_rect(color = NA),
+            plot.margin = margin(0,0,0,0))
+  }
+  return(px)
+}
+```
+```{r}
+e_mat_copblock <- e_mat_copblock + 
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cerc_bi", "cop_inf", "cop_block", cinf_cerc, F)),
+    xmin = 1.51, xmax = 2.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cop_inf", "cop_block", cinf_proc, F)),
+    xmin = 2.51, xmax = 3.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "cop_inf", "cop_block", cinf_fail, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cop_inf", "cop_block", cinf_surv, F)),
+    xmin = 4.51, xmax = 5.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cop_inf", "cop_block", cinf_finf, F)),
+    xmin = 5.51, xmax = 6.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cerc_bi", "cop_block", cerc_proc, F)),
+    xmin = 2.51, xmax = 3.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "cerc_bi", "cop_block", cerc_fail, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cerc_bi", "cop_block", cerc_surv, F)),
+    xmin = 4.51, xmax = 5.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cerc_bi", "cop_block", cerc_finf, F)),
+    xmin = 5.51, xmax = 6.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "proc_scl", "cop_block", proc_fail, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "proc_scl", "cop_block", proc_surv, F)),
+    xmin = 4.51, xmax = 5.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "proc_scl", "cop_block", proc_finf, F)),
+    xmin = 5.51, xmax = 6.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "nofailed_devo_bi", "cop_block", fail_surv, F)),
+    xmin = 4.51, xmax = 5.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "nofailed_devo_bi", "cop_block", fail_finf, F)),
+    xmin = 5.51, xmax = 6.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cop_surv_13dpe", "cop_block", surv_finf, F)),
+    xmin = 5.51, xmax = 6.49, ymin = 1.51, ymax = 2.49)
+```
+
+The points on the scatterplots are random effect estimates for blocks, after accounting for starting conditions (fixed effects) and other random effects (family). The lines are based on the covariance relationships predicted by the bivariate models (i.e. cov/var of x variable).  
+
+```{r}
+e_mat_copblock
+```
+```{r}
+ggsave(e_mat_copblock + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Emat_copblock_fsX.png", width = 6*12.5, height = 6*10, units = "mm")
+ggsave(e_mat_copblock + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Emat_copblock_fs.svg", width = 6*12.5, height = 6*10, units = "mm")
+```
+
+
+
+```{r}
+# # OLD CODE BASED ON UNIVARIATE RESIDUALS INSTEAD OF RANDOM EFFECT ESTIMATES FROM BIVARIATE MODELS
+# make_grob_scatter <- function(dat, var1, var2, weight_var){
+#   px <- dat%>%
+#   ggplot(., aes(get(var1), get(var2))) +
+#   # geom_hline(yintercept = 0, linetype = "dotted") + 
+#   # geom_vline(xintercept = 0, linetype = "dotted") +
+#   geom_point(size = 0.15) +
+#   geom_smooth(aes(weight = get(weight_var)), se = F, color = "black") +
+#   theme(axis.title = element_blank(),
+#         axis.text = element_blank(),
+#         axis.ticks = element_blank(),
+#         panel.grid = element_blank(),
+#         panel.border = element_rect(color = NA),
+#         plot.background = element_rect(color = NA),
+#         plot.margin = margin(0,0,0,0))
+# return(px)
+# }
+```
+```{r}
+# e_mat_copblock <- e_mat_copblock + 
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_cerc", "r_e_cinf", "n")),
+#     xmin = 1.51, xmax = 2.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_proc", "r_e_cinf", "n")),
+#     xmin = 2.51, xmax = 3.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_fail", "r_e_cinf", "n")),
+#     xmin = 3.51, xmax = 4.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_surv", "r_e_cinf", "n")),
+#     xmin = 4.51, xmax = 5.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_finf", "r_e_cinf", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_proc", "r_e_cerc", "n")),
+#     xmin = 2.51, xmax = 3.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_fail", "r_e_cerc", "n")),
+#     xmin = 3.51, xmax = 4.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_surv", "r_e_cerc", "n")),
+#     xmin = 4.51, xmax = 5.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_finf", "r_e_cerc", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_fail", "r_e_proc", "n")),
+#     xmin = 3.51, xmax = 4.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_surv", "r_e_proc", "n")),
+#     xmin = 4.51, xmax = 5.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_finf", "r_e_proc", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_surv", "r_e_fail", "n")),
+#     xmin = 4.51, xmax = 5.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_finf", "r_e_fail", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter(dat = dat_corr_cop_block, "r_e_finf", "r_e_surv", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 1.51, ymax = 2.49)
+```
+
+
+```{r}
+e_mat_tanks <- ggplot(biv_cor_comb%>%
+         filter(v_name == "Ve", 
+                trait1 %in% c("fsurv", "pler", "liver", "fgrow"),
+                trait2 %in% c("fsurv", "pler", "liver", "fgrow"))%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(aes(fill = cor)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Ve",
+                     trait1 %in% c("fsurv", "pler", "liver", "fgrow"),
+                     trait2 %in% c("fsurv", "pler", "liver", "fgrow"))%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "E-matrix, tank", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+  scale_x_discrete(
+    position = "top",
+    labels = c("fsurv", "pler", "fliver", "fgrow")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("fsurv", "pler", "fliver", "fgrow"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+```
+
+```{r}
+e_mat_tanks <- e_mat_tanks +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "fish_surv75", "tank_id", fsurv_pler, F)),
+    xmin = 1.51, xmax = 2.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "fish_surv75", "tank_id", fsurv_liver, F)),
+    xmin = 2.51, xmax = 3.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "fish_surv75", "tank_id", fsurv_fgrow, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "log_ww_scl", "tank_id", pler_liver, F)),
+    xmin = 2.51, xmax = 3.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "log_ww_scl", "tank_id", pler_fgrow, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "log_liver_scl", "tank_id", liver_fgrow, F)),
+    xmin = 3.51, xmax = 4.49, ymin = 1.51, ymax = 2.49)
+```
+
+Here is the tank-level matrix. The residual points account for starting conditions and genetic effects. The splines are weighted by the number of infected fish per tank. Tanks with big worms also had infected fish that grew more and had larger livers. There was also a non-significant trend for those tanks to have lower fish survival.
+
+```{r}
+e_mat_tanks
+```
+```{r}
+ggsave(e_mat_tanks + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig7_Emat_tank_fsX.png", width = 4*14, height = 4*11, units = "mm")
+ggsave(e_mat_tanks + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Emat_tank_fs.svg", width = 4*14, height = 4*11, units = "mm")
+```
+```{r}
+# px <- cowplot::plot_grid(
+#   e_mat_tanks + labs(title=NULL) + guides(fill = "none"),
+#   NULL,
+#   nrow = 2,
+#   rel_heights = c(4,2)
+# )
+# e_mat <- cowplot::plot_grid(
+#   e_mat_copblock + labs(title=NULL) + guides(fill = "none"),
+#   px,
+#   labels = c("A", "B"),
+#   nrow = 1,
+#   rel_widths = c(6,4),
+#   # rel_heights = c(6,4),
+#   align = "h",
+#   axis = "t"
+# )
+# e_mat
+```
+
+Now let's move to the G-matrix.
+
+```{r}
+g_mat <- ggplot(biv_cor_comb%>%
+         filter(v_name == "Vg")%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(aes(fill = cor)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Vg")%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "G-matrix", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+  scale_x_discrete(
+    position = "top",
+    labels = c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+```
+
+```{r}
+g_mat <- g_mat + 
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cerc_bi", "cop_inf", "worm_full_sib_fam_id", cinf_cerc, T)),
+    xmin = 1.51, xmax = 2.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cop_inf", "worm_full_sib_fam_id", cinf_proc, T)),
+    xmin = 2.51, xmax = 3.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "cop_inf", "worm_full_sib_fam_id", cinf_fail, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cop_inf", "worm_full_sib_fam_id", cinf_surv, T)),
+    xmin = 4.51, xmax = 5.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cop_inf", "worm_full_sib_fam_id", cinf_finf, T)),
+    xmin = 5.51, xmax = 6.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "cop_inf", "worm_full_sib_fam_id", cinf_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "cop_inf", "worm_full_sib_fam_id", cinf_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "cop_inf", "worm_full_sib_fam_id", cinf_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "cop_inf", "worm_full_sib_fam_id", cinf_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "cop_inf", "worm_full_sib_fam_id", cinf_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 10.51, ymax = 11.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cerc_bi", "worm_full_sib_fam_id", cerc_proc, T)),
+    xmin = 2.51, xmax = 3.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "cerc_bi", "worm_full_sib_fam_id", cerc_fail, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cerc_bi", "worm_full_sib_fam_id", cerc_surv, T)),
+    xmin = 4.51, xmax = 5.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cerc_bi", "worm_full_sib_fam_id", cerc_finf, T)),
+    xmin = 5.51, xmax = 6.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "cerc_bi", "worm_full_sib_fam_id", cerc_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "cerc_bi", "worm_full_sib_fam_id", cerc_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "cerc_bi", "worm_full_sib_fam_id", cerc_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "cerc_bi", "worm_full_sib_fam_id", cerc_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "cerc_bi", "worm_full_sib_fam_id", cerc_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("nofailed_devo_bi", "proc_scl", "worm_full_sib_fam_id", proc_fail, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "proc_scl", "worm_full_sib_fam_id", proc_surv, T)),
+    xmin = 4.51, xmax = 5.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "proc_scl", "worm_full_sib_fam_id", proc_finf, T)),
+    xmin = 5.51, xmax = 6.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "proc_scl", "worm_full_sib_fam_id", proc_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "proc_scl", "worm_full_sib_fam_id", proc_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "proc_scl", "worm_full_sib_fam_id", proc_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "proc_scl", "worm_full_sib_fam_id", proc_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "proc_scl", "worm_full_sib_fam_id", proc_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_surv, T)),
+    xmin = 4.51, xmax = 5.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_finf, T)),
+    xmin = 5.51, xmax = 6.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "nofailed_devo_bi", "worm_full_sib_fam_id", fail_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 7.51, ymax = 8.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("schisto_inf", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_finf, T)),
+    xmin = 5.51, xmax = 6.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "cop_surv_13dpe", "worm_full_sib_fam_id", surv_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 6.51, ymax = 7.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_surv75", "schisto_inf", "worm_full_sib_fam_id", finf_fsurv, T)),
+    xmin = 6.51, xmax = 7.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "schisto_inf", "worm_full_sib_fam_id", finf_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "schisto_inf", "worm_full_sib_fam_id", finf_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "schisto_inf", "worm_full_sib_fam_id", finf_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "schisto_inf", "worm_full_sib_fam_id", finf_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 5.51, ymax = 6.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_ww_scl", "fish_surv75", "worm_full_sib_fam_id", fsurv_pler, T)),
+    xmin = 7.51, xmax = 8.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "fish_surv75", "worm_full_sib_fam_id", fsurv_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "fish_surv75", "worm_full_sib_fam_id", fsurv_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "fish_surv75", "worm_full_sib_fam_id", fsurv_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 4.51, ymax = 5.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("log_liver_scl", "log_ww_scl", "worm_full_sib_fam_id", pler_liver, T)),
+    xmin = 8.51, xmax = 9.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "log_ww_scl", "worm_full_sib_fam_id", pler_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "log_ww_scl", "worm_full_sib_fam_id", pler_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("fish_final_bm_just_inf", "log_liver_scl", "worm_full_sib_fam_id", liver_fgrow, T)),
+    xmin = 9.51, xmax = 10.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "log_liver_scl", "worm_full_sib_fam_id", liver_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("eggs_scl", "fish_final_bm_just_inf", "worm_full_sib_fam_id", fgrow_eggs, T) + coord_cartesian(xlim = c(-1, NA))),
+    xmin = 10.51, xmax = 11.49, ymin = 1.51, ymax = 2.49)
+```
+
+```{r}
+## # OLD CODE BASED ON RESIDUALS FROM UNIVARIATE MODELS NOT BIV MODELS
+# make_grob_scatter2 <- function(dat, var1, var2, var3, weight_var){
+#   px <- dat%>%
+#   ggplot(., aes(get(var1), get(var2))) +
+#   # geom_hline(yintercept = 0, linetype = "dotted") + 
+#   # geom_vline(xintercept = 0, linetype = "dotted") +
+#   geom_point(aes(color = get(var3)), 
+#              # alpha = 0.33,
+#              size = 0.1) +
+#   geom_smooth(aes(weight = get(weight_var)), se = F, color = "black") +
+#   guides(color = "none") +
+#   theme(axis.title = element_blank(),
+#         axis.text = element_blank(),
+#         axis.ticks = element_blank(),
+#         panel.grid = element_blank(),
+#         panel.border = element_rect(color = NA),
+#         plot.background = element_rect(color = NA),
+#         plot.margin = margin(0,0,0,0)) +
+#   scale_color_manual(values = c("gray", "black", "red", "blue"))
+# return(px)
+# }
+
+# g_mat <- g_mat + 
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_cerc", "r_g_cinf", "line", "n_exp_cops")),
+#     xmin = 1.51, xmax = 2.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_proc", "r_g_cinf", "line", "n_exp_cops")),
+#     xmin = 2.51, xmax = 3.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fail", "r_g_cinf", "line", "n_exp_cops")),
+#     xmin = 3.51, xmax = 4.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_surv", "r_g_cinf", "line", "n_exp_cops")),
+#     xmin = 4.51, xmax = 5.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_finf", "r_g_cinf", "line", "n_exp_cops")),
+#     xmin = 5.51, xmax = 6.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_cinf", "line", "n_exp_fish")),
+#     xmin = 6.51, xmax = 7.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_cinf", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_cinf", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_cinf", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_cinf", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 10.51, ymax = 11.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_proc", "r_g_cerc", "line", "n_exp_cops")),
+#     xmin = 2.51, xmax = 3.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fail", "r_g_cerc", "line", "n_exp_cops")),
+#     xmin = 3.51, xmax = 4.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_surv", "r_g_cerc", "line", "n_exp_cops")),
+#     xmin = 4.51, xmax = 5.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_finf", "r_g_cerc", "line", "n_exp_cops")),
+#     xmin = 5.51, xmax = 6.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_cerc", "line", "n_exp_fish")),
+#     xmin = 6.51, xmax = 7.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_cerc", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_cerc", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_cerc", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_cerc", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fail", "r_g_proc", "line", "n_exp_cops")),
+#     xmin = 3.51, xmax = 4.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_surv", "r_g_proc", "line", "n_exp_cops")),
+#     xmin = 4.51, xmax = 5.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_finf", "r_g_proc", "line", "n_exp_cops")),
+#     xmin = 5.51, xmax = 6.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_proc", "line", "n_exp_fish")),
+#     xmin = 6.51, xmax = 7.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_proc", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_proc", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_proc", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_proc", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_surv", "r_g_fail", "line", "n_exp_cops")),
+#     xmin = 4.51, xmax = 5.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_finf", "r_g_fail", "line", "n_exp_cops")),
+#     xmin = 5.51, xmax = 6.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_fail", "line", "n_exp_fish")),
+#     xmin = 6.51, xmax = 7.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_fail", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_fail", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_fail", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_fail", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 7.51, ymax = 8.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_finf", "r_g_surv", "line", "n_exp_cops")),
+#     xmin = 5.51, xmax = 6.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_surv", "line", "n_exp_fish")),
+#     xmin = 6.51, xmax = 7.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_surv", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_surv", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_surv", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_surv", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 6.51, ymax = 7.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fsurv", "r_g_finf", "line", "n_exp_cops")),
+#     xmin = 6.51, xmax = 7.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_finf", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_finf", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_finf", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_finf", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 5.51, ymax = 6.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_pler", "r_g_fsurv", "line", "n_exp_fish")),
+#     xmin = 7.51, xmax = 8.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_fsurv", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_fsurv", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_fsurv", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 4.51, ymax = 5.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_liver", "r_g_pler", "line", "n_exp_fish")),
+#     xmin = 8.51, xmax = 9.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_pler", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_pler", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams, "r_g_fgrow", "r_g_liver", "line", "n_exp_fish")),
+#     xmin = 9.51, xmax = 10.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_liver", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_fams%>%filter(r_g_eggs > -4), "r_g_eggs", "r_g_fgrow", "line", "n_exp_fish")),
+#     xmin = 10.51, xmax = 11.49, ymin = 1.51, ymax = 2.49)
+```
+
+The diagonal represents the heritability estimates after controlling for starting conditions (like host size). The scatterplots are residuals after accounting for starting conditions and shared environments (like tanks). The splines are weighted by the number of copepods exposed per family (for traits in copepods) or the number of sticklebacks exposed per family (for fish and breeding traits). 
+
+Families with higher infection rates in copepods also tended to develop faster, develop succesfully, and grow larger in copepods. However, the skew in the plots suggests these trends are driven by a few low-infection, poor-developing families. Families with faster development in copepods also tended to have higher infection rates in sticklebacks and higher fecundity overall. 
+
+```{r}
+g_mat
+```
+```{r}
+ggsave(g_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Gmat_fsx.png", width = 11*12.5, height = 11*10, units = "mm")
+ggsave(g_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Gmat_fsx.svg", width = 11*12.5, height = 11*10, units = "mm")
+```
+
+The positive correlation between cercomere presence and egg number is worth a closer look, because when looking at selection responses, we saw that both the fast and slow line produced fewer eggs on average. So why does this pattern suggest fast genotypes are associated with more eggs? Egg production has a left-skew, i.e. most families produce as many eggs as expected, but some produce less. These less-fecund families can be in either the fast or slow line, but in either case, they tend to be families that are less likely to have a cercomere.
+
+```{r}
+# make_mat_plot("cerc_bi", "eggs_scl", "worm_full_sib_fam_id", cerc_eggs, T) + 
+#   geom_hline(yintercept = 0, linetype = "dotted") +
+#   geom_vline(xintercept = 0, linetype = "dotted") +
+#   coord_cartesian(xlim = c(-1, NA)) +
+#   geom_smooth(se =F) +
+#   labs(x = "Cercomer", y = "Fecundity")
+
+dat_corr_fams%>%filter(r_g_eggs > -4)%>%
+  ggplot(., aes(r_g_cerc, r_g_eggs)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_point(aes(color = line)) +
+  geom_smooth(aes(weight = n_exp_fish), se = F, color = "black") +
+  guides(color = "none") +
+  theme(panel.grid = element_blank(),
+        ) +
+  scale_color_manual(values = c("gray", "black", "red", "blue"))
+```
+
+A density plot shows how lower egg production skewed left in the selection lines compared to the controls.
+
+```{r}
+ggplot(dat_corr_mat%>%filter(r_g_eggs > -4, line != "base" ), aes(r_g_eggs, color = line)) +
+  # geom_histogram(aes(y = ..density..)) +
+  geom_density() +
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+Parental effects were significant for some traits, though they explained little variation. Nonetheless, we can also plot covariances between traits at the dam-level, e.g. if some worms invest more in offspring than others.
+
+```{r}
+m_mat <- ggplot(biv_cor_comb%>%
+         filter(v_name == "Vm")%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(aes(fill = cor)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Vm")%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "M-matrix", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+  scale_x_discrete(
+    position = "top",
+    labels = c("cinf", "cerc", "proc", "csurv")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("cinf", "cerc", "proc", "csurv"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+```
+```{r}
+m_mat <- m_mat +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cerc_bi", "cop_inf", "dam", cinf_cerc, T)),
+    xmin = 1.51, xmax = 2.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cop_inf", "dam", cinf_proc, T)),
+    xmin = 2.51, xmax = 3.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cop_inf", "dam", cinf_surv, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("proc_scl", "cerc_bi", "dam", cerc_proc, T)),
+    xmin = 2.51, xmax = 3.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "cerc_bi", "dam", cerc_surv, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_mat_plot("cop_surv_13dpe", "proc_scl", "dam", proc_surv, T)),
+    xmin = 3.51, xmax = 4.49, ymin = 1.51, ymax = 2.49)
+```
+
+Dams with higher infection rates tended to have a higher likelihood of having a cercomere, but the trend was not significant. In general, parental effects are minimal.
+
+```{r}
+m_mat
+```
+
+Here is the correlation between copepod infection rate and cercomere presence across dams.
+
+```{r}
+biv_cor_comb%>%
+  filter(v_name == "Vm", trait1 == "cinf", trait2 == "cerc")%>%
+  select(trait1, trait2, v_name, cor, cor_lwr, cor_upr)
+```
+
+In the base generation of the experiment, dams were randomly assigned (the individual breeding worms were not separated). This should reduce dam-level variance. However, even when we exclude these worms, there does not seem to be strong trends. For instance, here is the correlation between copepod infection rate and cercomere presence.
+
+```{r}
+dat_corr_dams%>%filter(line != "base")%>%
+  ggplot(., aes(r_m_cerc, r_m_cinf)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_point(aes(color = line)) +
+  geom_smooth(aes(weight = n_exp_cops), se = F, color = "black") +
+  guides(color = "none") +
+  theme(panel.grid = element_blank(),
+        ) +
+  scale_color_manual(values = c("black", "red", "blue"))
+```
+
+```{r}
+ggsave(m_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Mmat_fsX.png", width = 4*14, height = 4*11, units = "mm")
+ggsave(m_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Mmat_fsX.svg", width = 4*14, height = 4*11, units = "mm")
+```
+
+Starting conditions, shared environments, genetic effects, and parental effects did not explain all the variation in the measured traits. Thus, we can still look at the residual covariance after accounting for these traits. These are individual-level correlations. They could not be estimated for all trait combinations. For example, all plerocercoids were measured from worms that successfully infected fish, so there are no unique residuals. 
+
+
+```{r}
+make_res_mat_plot <- function(x_var, y_var, x_var_binary, y_var_binary, model) {
+
+  pd <- predict.MCMCglmm(model, type = "terms", marginal = NULL)
+  n_per <- length(dat_multi$id)
+  
+  t1 <- x_var
+  t2 <- y_var
+  dx <- select(dat_multi, gen, line, all_of(c(t1, t2)))
+  names(dx) <- c("gen", "line", "t1", "t2")
+  dx$t1_binary <- x_var_binary
+  dx$t2_binary <- y_var_binary
+  
+  # order of vars depends on model
+  if(min(grep(t1, colnames(model$Sol))) < min(grep(t2, colnames(model$Sol)))){
+    dx$p1 <- pd[1:n_per]
+    dx$p2 <- pd[(n_per+1):(n_per*2)]
+  } else {
+    dx$p1 <- pd[(n_per+1):(n_per*2)]
+    dx$p2 <- pd[1:n_per]
+  }
+  
+  dx <- dx%>%
+    mutate(
+      x = if_else(t1_binary, sqrt(-2 * log(1-pnorm(p1))) * sign(t1 - pnorm(p1)), t1 - p1),
+      y = if_else(t2_binary, sqrt(-2 * log(1-pnorm(p2))) * sign(t2 - pnorm(p2)), t2 - p2),
+      )
+  
+  var_x <- mean(model$VCV[,paste0("trait", t1, ":trait", t1, ".units") ])
+  cov_xy <- mean(model$VCV[,paste0("trait", t1, ":trait", t2, ".units") ])
+    
+  px <- ggplot(dx%>%
+                 filter(!is.na(x), !is.na(y)), 
+               aes(x, y)) +
+    geom_point(aes(color = line), size = 0.05) +
+    geom_abline(intercept = 0, slope = cov_xy/var_x) +
+    theme(axis.title = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank(),
+          panel.border = element_rect(color = NA),
+          plot.background = element_rect(color = NA),
+          plot.margin = margin(0,0,0,0)) +
+    scale_color_manual(values = c("gray", "black", "red", "blue")) +
+    guides(color = "none") 
+  return(px)
+}
+```
+
+```{r}
+r_mat <- ggplot(biv_cor_comb%>%
+         filter(v_name == "Vr")%>%
+         arrange(sig),
+       aes(x = trait1, y = trait2, color = sig)) +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Vr")%>%
+              filter(trait1==trait2),
+            fill = "white") +
+  geom_tile(data = biv_cor_comb%>%
+              filter(v_name == "Vr")%>%
+              filter(trait1!=trait2)%>%
+              arrange(sig),
+            aes(fill = cor)) +
+  geom_text(aes(label = cor_txt),
+            color = "black") +
+  geom_text(aes(label = v_txt),
+            color = "black") +
+  scale_fill_distiller(palette = "PuOr", 
+                       limits = c(-1*max_min_cor_col, max_min_cor_col)) +
+  labs(title = "R-matrix", fill = "Cor") +
+  guides(color = "none") +
+  scale_color_manual(values = c("white", "black")) +
+   scale_x_discrete(
+    position = "top",
+    labels = c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs")
+                   ) +
+  scale_y_discrete(
+    limits = rev,
+    labels = rev(c("cinf", "cerc", "proc", "no fail", "csurv", "finf", "fsurv", "pler", "fliver", "fgrow", "eggs"))
+    ) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+```
+
+```{r}
+r_mat <- r_mat +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("proc_scl", "cerc_bi", F, T, cerc_proc)),
+    xmin = 2.51, xmax = 3.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("cop_surv_13dpe", "cerc_bi", T, T, cerc_surv)),
+    xmin = 4.51, xmax = 5.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("schisto_inf", "cerc_bi", T, T, cerc_finf)),
+    xmin = 5.51, xmax = 6.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_surv75", "cerc_bi", T, T, cerc_fsurv)),
+    xmin = 6.51, xmax = 7.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("log_ww_scl", "cerc_bi", F, T, cerc_pler)),
+    xmin = 7.51, xmax = 8.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("log_liver_scl", "cerc_bi", F, T, cerc_liver)),
+    xmin = 8.51, xmax = 9.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_final_bm_just_inf", "cerc_bi", F, T, cerc_fgrow)),
+    xmin = 9.51, xmax = 10.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("eggs_scl", "cerc_bi", F, T, cerc_eggs)),
+    xmin = 10.51, xmax = 11.49, ymin = 9.51, ymax = 10.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("schisto_inf", "proc_scl", T, F, proc_finf)),
+    xmin = 5.51, xmax = 6.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_surv75", "proc_scl", T, F, proc_fsurv)),
+    xmin = 6.51, xmax = 7.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("log_ww_scl", "proc_scl", F, F, proc_pler)),
+    xmin = 7.51, xmax = 8.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("log_liver_scl", "proc_scl", F, F, proc_liver)),
+    xmin = 8.51, xmax = 9.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_final_bm_just_inf", "proc_scl", F, F, proc_fgrow)),
+    xmin = 9.51, xmax = 10.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("eggs_scl", "proc_scl", F, F, proc_eggs)),
+    xmin = 10.51, xmax = 11.49, ymin = 8.51, ymax = 9.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("log_liver_scl", "log_ww_scl", F, F, pler_liver)),
+    xmin = 8.51, xmax = 9.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_final_bm_just_inf", "log_ww_scl", F, F, pler_fgrow)),
+    xmin = 9.51, xmax = 10.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("eggs_scl", "log_ww_scl", F, F, pler_eggs)),
+    xmin = 10.51, xmax = 11.49, ymin = 3.51, ymax = 4.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("fish_final_bm_just_inf", "log_liver_scl", F, F, liver_fgrow)),
+    xmin = 9.51, xmax = 10.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("eggs_scl", "log_liver_scl", F, F, liver_eggs)),
+    xmin = 10.51, xmax = 11.49, ymin = 2.51, ymax = 3.49) +
+  annotation_custom(
+    ggplotGrob(make_res_mat_plot("eggs_scl", "fish_final_bm_just_inf", F, F, fgrow_eggs)),
+    xmin = 10.51, xmax = 11.49, ymin = 1.51, ymax = 2.49)
+```
+
+```{r}
+# r_mat <- r_mat +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_proc", "r_r_cerc", "line", "n")),
+#     xmin = 2.51, xmax = 3.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_surv", "r_r_cerc", "line", "n")),
+#     xmin = 4.51, xmax = 5.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_finf", "r_r_cerc", "line", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fsurv", "r_r_cerc", "line", "n")),
+#     xmin = 6.51, xmax = 7.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_pler", "r_r_cerc", "line", "n")),
+#     xmin = 7.51, xmax = 8.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_liver", "r_r_cerc", "line", "n")),
+#     xmin = 8.51, xmax = 9.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fgrow", "r_r_cerc", "line", "n")),
+#     xmin = 9.51, xmax = 10.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1)%>%filter(r_r_eggs > -2), "r_r_eggs", "r_r_cerc", "line", "n")),
+#     xmin = 10.51, xmax = 11.49, ymin = 9.51, ymax = 10.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_finf", "r_r_proc", "line", "n")),
+#     xmin = 5.51, xmax = 6.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fsurv", "r_r_proc", "line", "n")),
+#     xmin = 6.51, xmax = 7.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_pler", "r_r_proc", "line", "n")),
+#     xmin = 7.51, xmax = 8.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_liver", "r_r_proc", "line", "n")),
+#     xmin = 8.51, xmax = 9.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fgrow", "r_r_proc", "line", "n")),
+#     xmin = 9.51, xmax = 10.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1)%>%filter(r_r_eggs > -2), "r_r_eggs", "r_r_proc", "line", "n")),
+#     xmin = 10.51, xmax = 11.49, ymin = 8.51, ymax = 9.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_liver", "r_r_pler", "line", "n")),
+#     xmin = 8.51, xmax = 9.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fgrow", "r_r_pler", "line", "n")),
+#     xmin = 9.51, xmax = 10.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1)%>%filter(r_r_eggs > -2), "r_r_eggs", "r_r_pler", "line", "n")),
+#     xmin = 10.51, xmax = 11.49, ymin = 3.51, ymax = 4.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1), "r_r_fgrow", "r_r_liver", "line", "n")),
+#     xmin = 9.51, xmax = 10.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1)%>%filter(r_r_eggs > -2), "r_r_eggs", "r_r_liver", "line", "n")),
+#     xmin = 10.51, xmax = 11.49, ymin = 2.51, ymax = 3.49) +
+#   annotation_custom(
+#     ggplotGrob(make_grob_scatter2(dat = dat_corr_mat%>%mutate(n=1)%>%filter(r_r_eggs > -2), "r_r_eggs", "r_r_fgrow", "line", "n")),
+#     xmin = 10.51, xmax = 11.49, ymin = 1.51, ymax = 2.49)
+```
+
+There were several clear residual correlations. For example, all else equal, parasites with cercomeres and large sizes in copepods were more likely to infect fish, which is consistent with previous studies. Also, worms grew larger in fish that grew more and had bigger livers, suggesting that individual host matters. These worms also tended to produce more eggs. Surprisingly, there was a negative correlation between fecundity and cercomere presence - parasites that had a cercomere when it was not predicted tended to produce fewer eggs.
+
+```{r}
+r_mat
+```
+```{r}
+ggsave(r_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Rmat_fsx.png", width = 11*12.5, height = 11*10, units = "mm")
+ggsave(r_mat + labs(title=NULL) + guides(fill = "none"),
+       filename = "../figs/fig6_Rmat_fsx.svg", width = 11*12.5, height = 11*10, units = "mm")
+```
+
+To conclude, we estimated the covariances between traits at several levels: across shared environments, through shared genetics, and across residuals.
+
+```{r}
+save.image(file = "05quant_gen_multivariateTEST.RData")
+```
+
+
+
+
+
+
+
+```{r}
+sessionInfo()
+```
+
