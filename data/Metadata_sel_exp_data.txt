@@ -1,0 +1,108 @@
+The file "sel_exp_data_clean.csv" contains the results of a selection experiment, in which I conducted four generations of artificial selection on the developmental rate of a tapeworm (Schistocephalus solidus) in its copepod first host. My goals were to test whether faster development can evolve and to assess why it has not. Besides larval development, several other parasite and host traits were recorded, as were important covariates. The columns in the data are defined below. 
+
+
+id: unique individual id for parasite.
+
+dam: the dam for the parasite, corresponding to a value in the "id" column; the first parasites do not have a dam because they were the founders of the experiment.
+
+sire: the sire for the parasite, corresponding to a value in the "id" column; together id, dam, and sire encode the parasite pedigree.
+
+inbreeding_coef: the parasite's inbreeding coefficient.
+
+gen: generation of the selection experiment.
+
+parental_match: confidence in the assignment of dam and sire. Usually, the two parental worms in a breeding pair could be distinguished with microsatellite markers. This did not work in all cases, though. Thus, each individual is coded as follows: (0) dam and sire confidently assigned, (1) unsure about dam and sire assignment, (2) dam and sire randomly assigned (only applies to the initial generation when breeding parasite pairs were not separated).
+
+worm_full_sib_fam_id: worms were bred in pairs; this variable identifies each full-sibling parasite family.
+
+worm_maternal_id: breeding pairs were separated after ~48 h (except in the initial generation) to obtain two sets of genetically comparable eggs with clear parental identities. This variable distinguishes which of the two dams produced the parasite.
+
+selection_line: parasites belonged to the 'base' population in generation 0 or to one of the three selection lines (control, fast, slow) in latter generations.
+
+cop_id: unique identifier for each copepod. Copepods were infected in 24-well plates and this code is derived from their plate and position: <generation>_<plate_number>_<column_and_row_on_plate>.
+
+cop_block: copepods were infected and maintained in distinct groups. This variable encodes these experimental ‘blocks’.
+
+cop_inf: whether copepod was (1) or was not (0) infected with S. solidus.
+
+cop_checked_dpe: the day post exposure that copepods were checked for infection.
+
+cop_stage_checking: the developmental stage of the copepod when checked for infection. Copepodite stages 1, 2, 3, and 4 were exposed (C1, C2, C3, C4).
+
+cerc_ordinal: ordinal scoring of cercomer presence 9 days post infection. Parasite had well-formed cercomer (2), the beginning of a cercomer (1), or no cercomer (0).
+
+cerc_bi: binomial scoring of cercomer presence 9 days post infection. Parasite did (1) or did not (0) have a well-formed cercomer.
+
+cop_dead_13dpe: by 13 days post exposure, copepod was dead (1) or alive (0).
+
+failed_devo_13dpe: at 13 days post exposure, parasite developed normally (0). Alternatively, it had few calcareous corpuscles (1) or no cercomer (2). 
+
+failed_devo_bi: binomial scoring of parasite development 13 days post exposure. Parasite developed successfully (0) or exhibited defects (1) like few corpuscles and/or no cercomer.
+
+cop_length_mm: length of the copepod in mm from eye to the end of the cephalothorax.
+
+procercoid_size: the area of procercoids (um^2) measured in copepods in vivo 13 days post exposure.
+
+cop_remarks: miscellaneous remarks regarding the parasite's copepod life stage.
+
+used_fish_inf: the infected copepods used to infect fish (1).
+
+fish_id: unique identifier for each exposed fish.
+
+fish_exp_on_cop_dpe: the age of the parasite (days post exposure in copepods) when fed to fish.
+
+fish_initial_tl: stickleback total length in mm at the time of exposure.
+
+fish_initial_sl: stickleback standard length (excludes caudal fin) in mm at the time of exposure.
+
+fish_initial_bm_g: stickleback mass in g at the time of exposure.
+
+tank_id: codes the tank in which a fish was maintained.
+
+fish_surv: whether a fish was alive (0) or dead (1) when it was dissected; some fish died before the planned dissection date.
+
+age_fish_dissection: age, in days post exposure, when fish dissected.
+
+fish_final_tl: stickleback total length in mm at dissection.
+
+fish_final_sl: stickleback standard length in mm at dissection.
+
+fish_final_bm_g: stickleback mass in g at dissection.
+
+fish_final_bm_g_noworm: stickleback mass in g at dissection, excluding the mass of tapeworm plerocercoid.
+
+fish_liver_mg: stickleback liver mass in mg at dissection.
+
+fish_sex: male (0) or female (1) stickleback.
+
+fish_inf: whether stickleback was (1) or was not (0) infected with S. solidus.
+
+worm_bm_mg: mass of the tapeworm plerocercoid in mg.
+
+fish_and_copepod_matched: fish were maintained in groups in tanks. By microsatellite genotyping fish before exposure and after dissection, individual fish, and the procercoids they were given, could be identified. Most fish were unambiguously identified (0), but other matches were uncertain (1) or impossible (2), e.g. if DNA extractions failed.
+
+used_breeding: plerocercoid used for breeding (1).
+
+fish_worm_remark: miscellaneous remarks regarding the parasite's fish life stage.
+
+eggs_clutch_id: the full-sibling parasite family generated by breeding. Corresponds to the values in the column "worm_full_sib_fam_id".
+
+eggs_maternal_id: the maternal clutch produced by the parasite/dam. Corresponds to the values in the column "worm_maternal_id".
+
+breeding_block: parasites were bred in distinct groups. This variable encodes these ‘breeding blocks’.
+
+diff_mg_to_breeding_partner: absolute mass difference in mg between parasite and its breeding partner.
+
+breeding_partner_size_mg: mass in mg of the parasite's breeding partner.
+
+eggnum_d2_6_indiv: eggs produced by parasite from days 2 to 6 post incubation in in vitro.
+
+eggsize_d2_6_indiv: average size of eggs produced by parasite from days 2 to 6 post incubation in in vitro.
+
+clutchmass_d2_6_indiv: the total clutch mass (egg number x egg size) produced by parasite from days 2 to 6 post incubation in in vitro.
+
+eggs_checked_for_hatching: the number of eggs from the parasite scored for hatching.
+
+eggs_hatched: the number of hatched eggs out of those scored.
+
+hatching_rate_d2_6: the hatching rate for eggs produced by parasite from days 2 to 6 post incubation in in vitro.

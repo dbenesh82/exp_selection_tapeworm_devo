@@ -51,6 +51,24 @@ dat <- left_join(
   ped%>%mutate(ib = ib)%>%select(id, ib)
 )
 ```
+```{r}
+# nice data for dryad that include inbreeding coef
+write.csv(
+  dat%>%select(
+    id, dam, sire, inbreeding_coef = ib, gen, parental_match = maternal_match,
+    worm_full_sib_fam_id, worm_maternal_id, selection_line = line, cop_id, cop_block,
+    cop_inf, cop_checked_dpe, cop_stage_checking, cerc_ordinal, cerc_bi, 
+    cop_dead_13dpe, failed_devo_13dpe, failed_devo_bi, cop_length_mm, procercoid_size,
+    cop_remarks, used_fish_inf, fish_id, fish_exp_on_cop_dpe, fish_initial_tl, fish_initial_sl,
+    fish_initial_bm_g, tank_id, fish_surv, age_fish_dissection = age_dissection, fish_final_tl, 
+    fish_final_sl, fish_final_bm_g, fish_final_bm_g_noworm, fish_liver_mg, fish_sex, fish_inf = schisto_inf,
+    worm_bm_mg, fish_and_copepod_matched, used_breeding, fish_worm_remark, eggs_clutch_id, eggs_maternal_id,
+    breeding_block, diff_mg_to_breeding_partner, breeding_partner_size_mg, 
+    eggnum_d2_6_indiv, eggsize_d2_6_indiv, clutchmass_d2_6_indiv, 
+    eggs_checked_for_hatching = eggs_checked, eggs_hatched = hatched, hatching_rate_d2_6
+    ),
+  file = "../data/sel_exp_data_clean.csv", row.names = F)
+```
 
 Let's start by looking at the trait we selected upon: cercomere presence 9 day post infection.
 
