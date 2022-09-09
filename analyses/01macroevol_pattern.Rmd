@@ -197,7 +197,7 @@ tx2 +
   geom_cladelabel(node = 375, "Proteocephalidae", size = 1) 
 ```
 ```{r}
-f1b$theme$plot.margin
+# f1b$theme$plot.margin
 ```
 
 Let's put the two plots together.
@@ -214,8 +214,8 @@ f1
 
 
 ```{r}
-ggsave(f1, filename = "../figs/fig1_macro.png", width = 180, height = 90, units = "mm")
-ggsave(f1, filename = "../figs/fig1_macro.svg", width = 180, height = 90, units = "mm")
+# ggsave(f1, filename = "../figs/fig1_macro.png", width = 180, height = 90, units = "mm")
+# ggsave(f1, filename = "../figs/fig1_macro.svg", width = 180, height = 90, units = "mm")
 # Move closer together. Move labels.
 ```
 
