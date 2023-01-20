@@ -1,10 +1,10 @@
 The file "vir_exp_final_gen.csv" contains data on the survival of copepods infected with tapeworms (Schistocephalus solidus) from three selection lines: fast-developing, slow-developing, and controls. The survival of copepods was recorded, every second day, for 30 days post infection. Half these copepods were fed normally; the other half were starved to test whether survival costs to rapid development depended on host condition. The columns in the data are defined below.
 
-cop: individual-level copepod id.
+cop_id: individual-level copepod id.
 
-Inf.round: copepods were infected in two rounds.
+infection_round: copepods were infected in two rounds.
 
-clutch: the full-sib parasite family from the experiment's final generation used to infect copepod; each copepod received a single coracidium.
+sibship: the full-sib parasite family from the experiment's final generation used to infect copepod; each copepod received a single coracidium.
 
 selection_line: whether parasites belonged to the control, fast, or slow selection lines.
 
@@ -17,6 +17,8 @@ cop_stage_checking: the developmental stage of the copepod when checked for infe
 infection: whether copepod was (1) or was not (0) infected with S. solidus.
 
 grp: treatment group that combines exposure, infection, and selection line. Copepods were unexposed controls (unexp), exposed but uninfected (uninf), or infected with a parasite from one of the three lines (control, fast, slow).
+
+starved: whether copepods were fed normally (3 Artemia every other day) or starved.
 
 dead: whether copepod died during experiment (1) or survived until 30 days post infection (0).
 

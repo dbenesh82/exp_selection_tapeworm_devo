@@ -33,17 +33,21 @@ dat2 <- dat%>%
          )%>%
   mutate(grp = factor(grp, c("unexp", "uninf", "slow", "control", "fast")),
          starved_fct = if_else(starved == 0, "starved", "fed"),
+         clutch = if_else(clutch=="", NA_character_, paste0("4_", clutch)),
          inf_grp = case_when(exposed == 0 ~ "unexposed",
                              infection == 0 ~ "uninfected",
                              infection == 1 ~ "infected"),
          cop_stage_checking = factor(cop_stage_checking, levels = c("C2", "C1", "C3")))%>%
   mutate(starved_fct = factor(starved_fct, levels = c("fed", "starved")),
-         inf_grp = factor(inf_grp, levels = c("unexposed", "uninfected", "infected")))
+         inf_grp = factor(inf_grp, levels = c("unexposed", "uninfected", "infected")),
+         # clutch = if_else(clutch == "", NA_character_, clutch),
+         line = if_else(line == "", NA_character_, line)
+         )
 ```
 ```{r}
 write.csv(
-  select(dat2, cop, Inf.round, clutch, selection_line = line, exposed,
-         checking_day, cop_stage_checking, infection, grp, dead, dpi),
+  select(dat2, cop_id = cop, infection_round = Inf.round, sibship = clutch, selection_line = line, exposed,
+         checking_day, cop_stage_checking, infection, grp, starved=starved_fct, dead, dpi),
   file = "../data/vir_exp_final_gen.csv", row.names = F)
 ```
 
