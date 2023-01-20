@@ -45,12 +45,15 @@ sum(!is.na(dat_platy1$avg_dd))
 Let's look at the distribution of developmental times, distinguishing between species that have copepod first hosts (like our focal species, *S. solidus*) and those that do not. We can see that the shortest larval developmental times are about 10 days at 20 C, and often these are worms with copepod first hosts. The dashed vertical line represents *S. solidus*, so even among tapeworms with copepod first hosts, it tends to develop quickly.
 
 ```{r}
-pal <- RColorBrewer::brewer.pal(1, "Reds")
+pal_cop_fish <- RColorBrewer::brewer.pal(11, "PiYG")
+pal_cop <- pal_cop_fish[2]
+pal_fish <- pal_cop_fish[10]
+# pal <- RColorBrewer::brewer.pal(1, "Reds")
 ```
 
 
 ```{r}
-f1a <- ggplot(dat_platy1, aes(x = avg_dd/15, fill = is_cop)) +
+f1e <- ggplot(dat_platy1, aes(x = avg_dd/15, fill = is_cop)) +
   geom_histogram(
     bins = 60,
     colour = "black") +
@@ -76,7 +79,7 @@ f1a <- ggplot(dat_platy1, aes(x = avg_dd/15, fill = is_cop)) +
     hjust = 0.5, vjust = 0
   ) +
   facet_wrap(~is_cop, ncol = 1) +
-  scale_fill_manual(values = c("gray", pal[2])) +
+  scale_fill_manual(values = c("gray", pal_cop)) +
   guides(fill = F) +
   scale_x_log10(
     limits = c(3, max(dat_platy1$avg_dd/15, na.rm=T)+50),
@@ -87,7 +90,7 @@ f1a <- ggplot(dat_platy1, aes(x = avg_dd/15, fill = is_cop)) +
   theme(
     strip.background = element_blank(),
     strip.text.x = element_blank())
-f1a
+f1e
 ```
 
 Diverse tapeworms infect copepods. But is this a novel strategy, such that there may not have been enough time to evolve shorter development? Or is it an old life cycle, suggesting shorter development either is constrained or not favored? To answer this, let's import a molecular phylogeny. We restrict the tree to cestodes, make it dichotomous and ultrametric.
@@ -144,7 +147,7 @@ tx <- ggtree(tree_df,
        aes(color = factor(is_cop))) +
   # geom_tiplab2(size = 1, color = "black") +
   # guides(color = guide_legend(override.aes = list(size = 5))) +
-  scale_color_manual(values = c("gray", pal[2]),
+  scale_color_manual(values = c("gray", pal_cop),
                      labels = c("Not copepod", "Copepod")) +
   theme(legend.position = c(0.5, 0.5),
         legend.justification = c(0.5,1),
@@ -156,14 +159,14 @@ tx + geom_tiplab2(size = 1, color = "black")
 In fact, if we only label *S. solidus*, we see that it belongs to this early branching clade. Thus, the lineage has probably had a long time to adapt to copepods, likely hundreds of millions of years.
 
 ```{r}
-f1b <- tx +
+f1d <- tx +
   geom_tiplab2(data=tree_df%>%
                  filter(label == "Schistocephalus_solidus")%>%
                  mutate(label = "S. solidus"),
                color = "black",
                size = 2,
                fontface = "italic") 
-f1b
+f1d
 ```
 
 ```{r}
@@ -182,8 +185,8 @@ tx2 <- tx%>%
   # scaleClade(550, .3)%>%
   collapse(456, 'max', fill = "gray", alpha = 0.5)%>%
   collapse(667, 'max', fill = "gray", alpha = 0.5)%>%
-  collapse(352, 'max', fill = pal[2], alpha = 0.5)%>% # bothrioceph
-  collapse(375, 'max', fill = pal[2], alpha = 0.5)%>% # proteoceph
+  collapse(352, 'max', fill = pal_cop, alpha = 0.5)%>% # bothrioceph
+  collapse(375, 'max', fill = pal_cop, alpha = 0.5)%>% # proteoceph
   collapse(550, 'max', fill = "gray", alpha = 0.5) # anoplo 
 
 tx2 +
@@ -197,25 +200,285 @@ tx2 +
   geom_cladelabel(node = 375, "Proteocephalidae", size = 1) 
 ```
 ```{r}
-# f1b$theme$plot.margin
+# f1d$theme$plot.margin
 ```
 
 Let's put the two plots together.
 
 ```{r}
-f1 <- cowplot::plot_grid(f1b + theme(plot.margin = margin(0, 0, 0, 0, "pt")), 
-                         f1a + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
-                         rel_widths = c(1.5,1),
-                         # align = "hv",
-                         labels = c("(a)", "(b)"))
-f1
+f1_phy <- cowplot::plot_grid(
+  f1d + theme(plot.margin = margin(0, 0, 0, 0, "pt")), 
+  f1e + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
+  rel_widths = c(1.5,1),
+  # align = "hv",
+  labels = c("D", "E"))
+f1_phy
 ```
 
 
 
 ```{r}
-# ggsave(f1, filename = "../figs/fig1_macro.png", width = 180, height = 90, units = "mm")
-# ggsave(f1, filename = "../figs/fig1_macro.svg", width = 180, height = 90, units = "mm")
+# ggsave(f1, filename = "../figs/fig1_macro2.png", width = 180, height = 90, units = "mm")
+# ggsave(f1, filename = "../figs/fig1_macro2.svg", width = 180, height = 60, units = "mm")
+# Move closer together. Move labels.
+```
+
+
+
+# Growth curves
+
+```{r}
+gc_cop <- read.csv(file="../data/growth_rate_in_cops_Michaud.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+gc_fish1 <- read.csv(file="../data/growth_rate_in_fish_Scharsack.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+gc_fish2 <- read.csv(file="../data/growth_curve_NOworms_GPS_fish.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+```
+
+```{r}
+# mortality rate estimates from McCoy and Gilooly 2008
+cop_mort <- gc_cop$mort[1]
+fish_mort <- gc_fish1$mort[1]
+```
+
+```{r}
+gc_fish1$Day[1] <- 0
+
+gc_cop <- gc_cop %>%
+  mutate(log_size_mg = log(Size_mg))
+gc_fish1 <- gc_fish1 %>%
+  mutate(log_size_mg = log(Size_mg2))
+gc_fish2 <- gc_fish2 %>%
+  mutate(log_size_mg = log(ww),
+         Day = age)
+```
+
+
+Now let's fit equations for the growth. We'll explore different ways of fitting the asymptotic curve to the copepod growth data: 1) the equation used by Michaud et al., 2) a similar equation but including a starting size, 3) fitting the curve to log size.
+
+```{r}
+iPar <- list(Asym = max(gc_cop$Size_mg, na.rm = T), lrc = -8.2)
+tl_asy_cop_Mich <- nls(Size_mg ~ Asym * exp(lrc/Day),
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+iPar <- list(Asym = max(gc_cop$Size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_cop$Size_mg, na.rm = T))
+tl_asy_cop <- nls(Size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+iPar <- list(Asym = max(gc_cop$log_size_mg, na.rm = T), lrc = 0.04, R0 = min(gc_cop$log_size_mg, na.rm = T))
+tl_asy_cop_log <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+```
+
+Now we fit growth curves for fish size. Given the plots above, it only makes sense to fit curves to log-transformed body size. We fit 3 asymptotic relationships (von Bertallanfy growth): 1) to the Scharsack et al. data, 2) to the Benesh data, 3) to both datasets with the Scharsack data weighted by sample size.
+
+```{r}
+gc_fish_comb <- bind_rows(
+  gc_fish1%>%mutate(src = "Scharsack et al."),
+  gc_fish2%>%mutate(src = "Benesh misc")
+  )
+gc_fish_comb <- gc_fish_comb%>%
+  mutate(n_weight = if_else(!is.na(n_inf), n_inf, as.integer(1)))
+```
+
+```{r}
+iPar <- list(Asym = max(gc_fish1$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish1$log_size_mg, na.rm = T))
+tl_asy_fish <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish1)
+
+iPar <- list(Asym = max(gc_fish2$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish2$log_size_mg, na.rm = T))
+tl_asy_fish2 <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish2)
+
+iPar <- list(Asym = max(gc_fish_comb$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish_comb$log_size_mg, na.rm = T))
+tl_asy_fish3 <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish_comb,
+          weights = n_weight)
+```
+```{r}
+# average coefficent values from both datasets.
+avg_coef_fish <- (coef(tl_asy_fish) + coef(tl_asy_fish2))/2
+```
+
+
+
+```{r}
+x <- 0:95
+lg <- data.frame(
+  x = x,
+  y =  exp( predict(tl_asy_fish, newdata = data.frame(Day = x))),
+  y2 = exp( predict(tl_asy_fish2, newdata = data.frame(Day = x))),
+  y3 = exp( predict(tl_asy_fish3, newdata = data.frame(Day = x))),
+  y4 = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - avg_coef_fish["R0"]) * exp(-avg_coef_fish["lrc"]*x))
+  )
+```
+
+Now that we have growth curves for both parasites, we can compare growth rates and asymtotic sizes.
+
+```{r}
+gc_cop <- gc_cop %>%
+  mutate(host = "cop")
+
+
+x <- 0:95
+gc_fish_opt <- data.frame(
+  Day_fish = x,
+  Day = x + 11,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 11)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 11)%>%.$Surv * exp(-fish_mort*x),
+  grp = "opt", host = "fish"
+  )
+
+gc_fish_fast <- data.frame(
+  Day_fish = x,
+  Day = x + 4,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 4)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 4)%>%.$Surv * exp(-fish_mort*x),
+  grp = "fast", host = "fish"
+  )
+
+gc_fish_slow <- data.frame(
+  Day_fish = x,
+  Day = x + 18,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 18)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 18)%>%.$Surv * exp(-fish_mort*x),
+  grp = "slow", host = "fish"
+  )
+
+gc_pred <- 
+  bind_rows(
+    gc_cop,
+    gc_fish_opt,
+    gc_fish_fast,
+    gc_fish_slow
+)
+```
+
+This is what parasite growth in the first two hosts looks like with different transmission times. 
+
+```{r}
+line_size <- 1
+
+f1a <- ggplot(gc_pred%>%
+         filter(Day>1, host == "fish"), 
+       aes(Day, Size_mg)) +
+  geom_line(data = gc_pred%>%
+              filter(Day>1, host == "cop"), 
+            color = pal_cop, size = line_size) +
+  geom_line(aes(group = grp, linetype = grp), 
+            color = pal_fish,
+            size = line_size) +
+  geom_point(data = gc_pred%>%filter(Day_fish == 0, host == "fish"),
+             color = pal_fish,
+             shape = 16, size = 2) +
+  geom_hline(yintercept = 50, linetype = "dotted") +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  scale_y_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_linetype_manual(values = c("dashed", "solid", "dotted")) +
+  guides(linetype = F) +
+  coord_cartesian(xlim = c(2, 65), expand = c(0,1)) +
+  labs(x = "Age", y = "Parasite mass (mg)") +
+  annotate("text", x = 33, y = 0.0008, label = "Copepod", color = pal_cop) +
+  annotate("text", x = 18, y = 1, angle = 50, label = "Stickleback", color = pal_fish) 
+f1a
+```
+
+
+Now let's look at host survival. It immediately decreases once the parasite is transmitted to fish. There are big differences in survival probability, depending on when parasites are transmitted from the high-mortality copepod hosts.
+
+```{r}
+f1b <- ggplot(gc_pred%>%
+         filter(Day>1, host == "fish"), 
+       aes(Day, Surv)) +
+  geom_line(data = gc_pred%>%
+              filter(Day>1, host == "cop"), 
+            color = pal_cop, size = line_size) +
+  geom_line(aes(group = grp, linetype = grp), 
+            color = pal_fish,
+            size = line_size) +
+  geom_point(data = gc_pred%>%filter(Day_fish == 0, host == "fish"),
+             color = pal_fish,
+             shape = 16, size = 2) + 
+  #shape = "|", size = 7) +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  scale_linetype_manual(values = c("dashed", "solid", "dotted")) +
+  guides(linetype = F) +
+  coord_cartesian(xlim = c(2, 65), expand = c(0,1)) +
+  labs(x = "Age", y = "Survival probability")
+f1b
+```
+
+If fitness is simply body mass x survival probability, then we can calculate it for different transmission times.
+
+```{r}
+gc_cop_fit <- gc_cop%>%
+  filter(Day < 21)%>%
+  select(Day_cop = Day, 
+         Surv_cop = Surv,
+         Size_mg_cop = Size_mg, 
+         log_size_mg_cop = log_size_mg)%>%
+  mutate(Surv_cop_hi = exp(-0.01*Day_cop),
+         Surv_cop_lo = exp(-0.1*Day_cop))
+
+gc_cop_fit <- gc_cop_fit%>%
+  mutate(Days_fish = 60)%>%
+  mutate(
+    Size_mg_fish = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - log_size_mg_cop) * exp(-avg_coef_fish["lrc"]*Days_fish)),
+    Surv_fish = exp(-fish_mort*Days_fish))%>%
+  mutate(age = Day_cop + Days_fish, 
+         surv_prob = Surv_cop * Surv_fish,
+         surv_prob_hi = Surv_cop_hi * Surv_fish,
+         surv_prob_lo = Surv_cop_lo * Surv_fish)%>%
+  mutate(lrs = Size_mg_fish * surv_prob,
+         lrs_hi = Size_mg_fish * surv_prob_hi,
+         lrs_lo = Size_mg_fish * surv_prob_lo)%>%
+  mutate(rel_fit = lrs/max(lrs),
+         rel_fit_hi = lrs_hi/max(lrs_hi),
+         rel_fit_lo= lrs_lo/max(lrs_lo))
+```
+```{r}
+f1c <- ggplot(gc_cop_fit%>%filter(Day_cop > 2), 
+       aes(Day_cop, rel_fit)) +
+  geom_line(size = line_size) +
+  # geom_line(aes(y = rel_fit_hi)) +
+  # geom_line(aes(y = rel_fit_lo)) +
+  geom_point(
+    data = gc_cop_fit%>%filter(Day_cop %in% c(4, 11, 18)),
+    color = pal_fish,
+    shape = 16, size = 2 #shape = "|", size = 7
+  ) +
+  labs(y = "Relative fitness", x = "Days in copepods") +
+  scale_x_continuous(limits = c(3,20), expand = c(0,0))
+f1c
+```
+
+```{r}
+f1_out <- cowplot::plot_grid(
+  f1a + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")), 
+  f1b + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
+  f1c + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
+  nrow = 1,
+  labels = c("A", "B", "C"))
+```
+
+```{r}
+f1 <- cowplot::plot_grid(
+  f1_out,
+  f1_phy,
+  ncol = 1,
+  rel_heights = c(1, 1.2)
+  )
+f1
+```
+
+```{r}
+# ggsave(f1, filename = "../figs/fig1_macro2.png", width = 180, height = 120, units = "mm")
+# ggsave(f1, filename = "../figs/fig1.svg", width = 180, height = 120, units = "mm")
 # Move closer together. Move labels.
 ```
 

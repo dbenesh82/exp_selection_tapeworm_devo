@@ -1,0 +1,498 @@
+---
+title: "Growth of S. solidus in first two hosts"
+output: html_document
+date: '2022-12-23'
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE)
+options(stringsAsFactors = FALSE)
+theme_set(theme_bw())
+theme_update(panel.grid.minor = element_blank())
+```
+
+
+Load the growth data for the first two hosts.
+
+```{r}
+gc_cop <- read.csv(file="../data/growth_rate_in_cops_Michaud.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+gc_fish1 <- read.csv(file="../data/growth_rate_in_fish_Scharsack.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+gc_fish2 <- read.csv(file="../data/growth_curve_NOworms_GPS_fish.csv", header = TRUE, fileEncoding="UTF-8-BOM")
+```
+
+```{r}
+# mortality rate estimates from McCoy and Gilooly 2008
+cop_mort <- gc_cop$mort[1]
+fish_mort <- gc_fish1$mort[1]
+```
+
+```{r}
+gc_fish1$Day[1] <- 0
+
+gc_cop <- gc_cop %>%
+  mutate(log_size_mg = log(Size_mg))
+gc_fish1 <- gc_fish1 %>%
+  mutate(log_size_mg = log(Size_mg2))
+gc_fish2 <- gc_fish2 %>%
+  mutate(log_size_mg = log(ww),
+         Day = age)
+```
+
+First, make some simple plots of the growth data. Here is the estimated growth in copepods, as described in Michaud et al. 2006. Their first measurment was 3 dpi, so the start of the curve is probably too steep.
+
+```{r}
+pal_cop_fish <- RColorBrewer::brewer.pal(11, "PiYG")
+pal_cop <- pal_cop_fish[2]
+pal_fish <- pal_cop_fish[10]
+```
+
+```{r}
+ggplot(gc_cop, aes(Day, Size_mg)) +
+  geom_line(color = pal_cop)
+```
+
+Here is parasite growth in sticklebacks as described by Scharsack et al. 2007
+
+```{r}
+ggplot(gc_fish1, aes(Day, Size_mg2)) +
+  geom_line() +
+  geom_point(color = pal_fish)
+```
+Given that the parasite increases in mass by several orders of magnitude, it makes sense to plot this on a log scale.
+
+```{r}
+ggplot(gc_fish1, aes(Day, Size_mg2)) +
+  geom_line() +
+  geom_point(color = pal_fish) +
+  scale_y_log10()
+```
+
+Here is the same plot, but for data taken from Benesh and Hafer 2012 and from the selection experiment.
+
+```{r}
+ggplot(gc_fish2, aes(age, ww)) +
+  geom_point(color = pal_fish) +
+  geom_smooth(color = "black") +
+  scale_y_log10()
+```
+
+Here are the two growth curves overlaid on each other (Scharsack et al. in red). They are quite similar.
+
+```{r}
+ggplot(gc_fish1, aes(Day, Size_mg2)) +
+  geom_point(data = gc_fish2, aes(age, ww)) +
+  geom_smooth(data = gc_fish2, aes(age, ww), se = F, color = "black") +
+  geom_line(color = "red") +
+  geom_point(color = "red", size = 2) +
+  scale_y_log10()
+```
+
+Now let's fit equations for the growth. We'll explore different ways of fitting the asymptotic curve to the copepod growth data: 1) the equation used by Michaud et al., 2) a similar equation but including a starting size, 3) fitting the curve to log size.
+
+```{r}
+iPar <- list(Asym = max(gc_cop$Size_mg, na.rm = T), lrc = -8.2)
+tl_asy_cop_Mich <- nls(Size_mg ~ Asym * exp(lrc/Day),
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+iPar <- list(Asym = max(gc_cop$Size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_cop$Size_mg, na.rm = T))
+tl_asy_cop <- nls(Size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+iPar <- list(Asym = max(gc_cop$log_size_mg, na.rm = T), lrc = 0.04, R0 = min(gc_cop$log_size_mg, na.rm = T))
+tl_asy_cop_log <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_cop%>%filter(Day>2))
+
+```
+
+Here are the curves. The black line is the result published by Michaud. The blue line adds a starting size, which is estimated to be negative. The red line is based on log sizes and seems too steep.
+
+```{r}
+x<-0:80
+lg <- data.frame(x = x,
+                 y = predict(tl_asy_cop, newdata = data.frame(Day = x)),
+                 y2 = exp( predict(tl_asy_cop_log, newdata = data.frame(Day = x)) ),
+                 y3= predict(tl_asy_cop_Mich, newdata = data.frame(Day = x)) )
+
+ggplot(gc_cop, aes(Day, Size_mg)) +
+  geom_line() +
+  geom_line(data = lg, aes(x = x, y = y),
+              linetype = "dashed", color = "blue", size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y2),
+              linetype = "dashed", color = "red", size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y3),
+              linetype = "dashed", color = "black", size = 1.5) 
+```
+
+Now we fit growth curves for fish size. Given the plots above, it only makes sense to fit curves to log-transformed body size. We fit 3 asymptotic relationships (von Bertallanfy growth): 1) to the Scharsack et al. data, 2) to the Benesh data, 3) to both datasets with the Scharsack data weighted by sample size.
+
+```{r}
+gc_fish_comb <- bind_rows(
+  gc_fish1%>%mutate(src = "Scharsack et al."),
+  gc_fish2%>%mutate(src = "Benesh misc")
+  )
+gc_fish_comb <- gc_fish_comb%>%
+  mutate(n_weight = if_else(!is.na(n_inf), n_inf, as.integer(1)))
+```
+
+```{r}
+iPar <- list(Asym = max(gc_fish1$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish1$log_size_mg, na.rm = T))
+tl_asy_fish <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish1)
+
+iPar <- list(Asym = max(gc_fish2$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish2$log_size_mg, na.rm = T))
+tl_asy_fish2 <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish2)
+
+iPar <- list(Asym = max(gc_fish_comb$log_size_mg, na.rm = T), lrc = 0.02, R0 = min(gc_fish_comb$log_size_mg, na.rm = T))
+tl_asy_fish3 <- nls(log_size_mg ~ Asym - (Asym - R0) * exp(-lrc*Day), # for this parameterization of VBLG, see here: https://derekogle.com/NCNRS349/modules/Growth/BKG
+          start = iPar,
+          data = gc_fish_comb,
+          weights = n_weight)
+```
+```{r}
+# average coefficent values from both datasets.
+avg_coef_fish <- (coef(tl_asy_fish) + coef(tl_asy_fish2))/2
+```
+
+
+
+```{r}
+x <- 0:95
+lg <- data.frame(
+  x = x,
+  y =  exp( predict(tl_asy_fish, newdata = data.frame(Day = x))),
+  y2 = exp( predict(tl_asy_fish2, newdata = data.frame(Day = x))),
+  y3 = exp( predict(tl_asy_fish3, newdata = data.frame(Day = x))),
+  y4 = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - avg_coef_fish["R0"]) * exp(-avg_coef_fish["lrc"]*x))
+  )
+```
+
+Here are the predicted curves. The growth rate (slope) is a bit higher with the Benesh data, whereas the estimated asymptote is larger in Scharsack et al., probably because by their final measurement (67 dpi) growth has not yet strongly slowed. The black line is the curve fit to the pooled data - it more closely follows the Benesh data because it is the larger data set (604 vs 221 fish).
+
+```{r}
+pal <- RColorBrewer::brewer.pal(4, "Set1")
+ggplot(gc_fish_comb, aes(Day, exp(log_size_mg))) +
+  geom_point(aes(color = src, size = log(n_weight))) +
+  scale_color_manual(values = pal[1:2]) +
+  geom_line(data = lg, aes(x = x, y = y),
+              linetype = "dashed", color = pal[2], size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y2),
+              linetype = "dashed", color = pal[1], size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y3),
+              linetype = "dashed", color = "black", size = 1.5) +
+  # geom_line(data = lg, aes(x = x, y = y4),
+  #             linetype = "dashed", color = pal[4], size = 1.5) +
+  scale_y_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) 
+```
+We can also plot the curve from the average coefficents from the first two curves. This curve (purple) looks quite reasonable, so we will use this equation going forward.
+
+```{r}
+pal <- RColorBrewer::brewer.pal(4, "Set1")
+ggplot(gc_fish_comb, aes(Day, exp(log_size_mg))) +
+  geom_point(aes(color = src, size = log(n_weight))) +
+  scale_color_manual(values = pal[1:2]) +
+  geom_line(data = lg, aes(x = x, y = y),
+              linetype = "dashed", color = pal[2], size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y2),
+              linetype = "dashed", color = pal[1], size = 1.5) +
+  # average prediction between first two curves
+  # geom_line(data = lg%>%mutate(y5 = exp((log(y)+log(y2))/2)), aes(x = x, y = y5),
+  #             linetype = "dashed", color = pal[4], size = 1.5) +
+  geom_line(data = lg, aes(x = x, y = y4),
+              linetype = "dashed", color = pal[4], size = 1.5) +
+  scale_y_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) 
+```
+
+Now that we have growth curves for both parasites, we can compare growth rates and asymtotic sizes.
+
+```{r}
+gc_cop <- gc_cop %>%
+  mutate(host = "cop")
+
+
+x <- 0:95
+gc_fish_opt <- data.frame(
+  Day_fish = x,
+  Day = x + 11,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 11)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 11)%>%.$Surv * exp(-fish_mort*x),
+  grp = "opt", host = "fish"
+  )
+
+gc_fish_fast <- data.frame(
+  Day_fish = x,
+  Day = x + 4,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 4)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 4)%>%.$Surv * exp(-fish_mort*x),
+  grp = "fast", host = "fish"
+  )
+
+gc_fish_slow <- data.frame(
+  Day_fish = x,
+  Day = x + 18,
+  Size_mg = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - gc_cop%>%filter(Day == 18)%>%.$log_size_mg) * exp(-avg_coef_fish["lrc"]*x)),
+  Surv = gc_cop%>%filter(Day == 18)%>%.$Surv * exp(-fish_mort*x),
+  grp = "slow", host = "fish"
+  )
+
+gc_pred <- 
+  bind_rows(
+    gc_cop,
+    gc_fish_opt,
+    gc_fish_fast,
+    gc_fish_slow
+)
+```
+
+This is what parasite growth in the first two hosts looks like with different transmission times. 
+
+```{r}
+line_size <- 1
+
+f1a <- ggplot(gc_pred%>%
+         filter(Day>1, host == "fish"), 
+       aes(Day, Size_mg)) +
+  geom_line(data = gc_pred%>%
+              filter(Day>1, host == "cop"), 
+            color = pal_cop, size = line_size) +
+  geom_line(aes(group = grp, linetype = grp), 
+            color = pal_fish,
+            size = line_size) +
+  geom_point(data = gc_pred%>%filter(Day_fish == 0, host == "fish"),
+             color = pal_fish,
+             shape = 16, size = 2) +
+  geom_hline(yintercept = 50, linetype = "dotted") +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  scale_y_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_linetype_manual(values = c("dashed", "solid", "dotted")) +
+  guides(linetype = F) +
+  coord_cartesian(xlim = c(2, 65), expand = c(0,1)) +
+  labs(x = "Age", y = "Parasite mass (mg)") +
+  annotate("text", x = 33, y = 0.0008, label = "Copepod", color = pal_cop) +
+  annotate("text", x = 18, y = 1, angle = 50, label = "Stickleback", color = pal_fish) 
+f1a
+```
+
+The maximum size is clearly different in the two hosts
+
+```{r}
+gc_pred%>%
+  group_by(host)%>%
+  summarize(max_size = max(Size_mg))%>%
+  ungroup%>%
+  mutate(fold_diff = max_size/lag(max_size))
+```
+
+So the absolute growth rate until infectivity is also clearly different.
+
+```{r}
+bind_rows(
+  gc_cop%>%
+    filter(Day %in% c(0, 11))%>%
+    summarize(GR_mg_per_day = (Size_mg - lag(Size_mg))/(Day-lag(Day)))%>%
+    filter(!is.na(GR_mg_per_day))%>%
+    mutate(host = "cop"),
+  
+  bind_rows(
+      lg%>%
+        filter(x == 0),
+      lg%>%
+        filter(y4 > 50)%>%
+        slice(n = 1)
+    )%>%
+      summarize(GR_mg_per_day = (y4 - lag(y4))/(x-lag(x)))%>%
+      filter(!is.na(GR_mg_per_day))%>%
+      mutate(host = "fish")
+)%>%
+  mutate(fold_diff = GR_mg_per_day/lag(GR_mg_per_day))
+```
+
+But on the log scale of the plot, the growth rates in the two hosts are not so different, at least initially before growth in copepods begins to reach an asymptote. The RGR until infectivity is higher in cops.
+
+```{r}
+# RGR until infectivity
+bind_rows(
+  gc_cop%>%
+    filter(Day %in% c(0, 11))%>%
+    summarize(RGR = (log_size_mg - lag(log_size_mg))/Day)%>%
+    filter(!is.na(RGR))%>%
+    mutate(host = "cop") ,
+
+  bind_rows(
+    lg%>%
+      filter(x == 0),
+    lg%>%
+      filter(y4 > 50)%>%
+      slice(n = 1)
+  )%>%
+    summarize(RGR = (log(y4) - lag(log(y4)))/x)%>%
+    filter(!is.na(RGR))%>%
+    mutate(host = "fish")
+)
+```
+
+But the RGR in the first week, well before constraints kick in, is quite comparable.
+
+```{r}
+# RGR until infectivity
+bind_rows(
+  gc_cop%>%
+  filter(Day %in% c(0, 7))%>%
+  summarize(RGR = (log_size_mg - lag(log_size_mg))/(Day - lag(Day)))%>%
+    filter(!is.na(RGR))%>%
+    mutate(host = "cop") ,
+
+  lg%>%
+  filter(x %in% c(0, 7))%>%
+  summarize(RGR = (log(y4) - lag(log(y4)))/(x - lag(x)))%>%
+    filter(!is.na(RGR))%>%
+    mutate(host = "fish")
+)
+```
+
+And since relative size differences are not that big among fish-infecting parasites, there is little delay in reaching infectivity in fish - a few days.
+
+```{r}
+filter(gc_pred, host == "fish", Size_mg > 50)%>%
+  group_by(grp)%>%
+  arrange(grp, Size_mg)%>%
+  slice_head(n=1)%>%
+  select(Age = Day, Day_fish, Size_mg, grp, Surv)
+```
+
+Given the large changes in size, it is more useful to look at relative growth rates in the two hosts. The growth rate in the youngest procercoids in copepods might be greater than the youngest plerocercoids in fish. But after less than a week in copepods, the relative growth rate dips below that in sticklebacks.
+
+```{r}
+ggplot(gc_pred%>%
+         filter(Day_fish > 2, host == "fish", grp == "opt")%>%
+         mutate(rgr = (log(Size_mg) - lag(log(Size_mg)))/(Day_fish - lag(Day_fish))),
+       aes(Day_fish, y = rgr)) +
+  geom_line(color = pal_fish) +
+  geom_line(
+    data = gc_pred%>%
+      filter(Day > 2, host == "cop")%>%
+      mutate(rgr = (log(Size_mg) - lag(log(Size_mg)))/(Day - lag(Day))),
+    aes(Day, y = rgr),
+    color = pal_cop) +
+  coord_cartesian(xlim = c(3, 20)) +
+  labs(y = "Relative growth rate", x = "Days in host")
+```
+
+Relative growth rate is also a function of body size (small worms grow relatively faster than big ones). Here is the plot of relative growth rate as a function of body mass. The growth rate in copepods slows well before they are transmitted.
+
+```{r}
+ggplot(gc_pred%>%
+         filter(host == "fish", grp == "opt")%>%
+         mutate(rgr = (log(Size_mg) - lag(log(Size_mg)))/(Day_fish - lag(Day_fish))),
+       aes(Size_mg, y = rgr)) +
+  geom_line(color = pal_fish) +
+  geom_line(
+    data = gc_pred%>%
+      filter(Day > 2, host == "cop")%>%
+      mutate(rgr = (log(Size_mg) - lag(log(Size_mg)))/(Day - lag(Day))),
+    aes(Size_mg, y = rgr),
+    color = pal_cop) +
+  scale_x_log10() +
+  # coord_cartesian(xlim = c(3, 20)) +
+  labs(y = "Relative growth rate", x = "Body size (mg)")
+```
+
+Now let's look at host survival. It immediately decreases once the parasite is transmitted to fish. There are big differences in survival probability, depending on when parasites are transmitted from the high-mortality copepod hosts.
+
+```{r}
+f1b <- ggplot(gc_pred%>%
+         filter(Day>1, host == "fish"), 
+       aes(Day, Surv)) +
+  geom_line(data = gc_pred%>%
+              filter(Day>1, host == "cop"), 
+            color = pal_cop, size = line_size) +
+  geom_line(aes(group = grp, linetype = grp), 
+            color = pal_fish,
+            size = line_size) +
+  geom_point(data = gc_pred%>%filter(Day_fish == 0, host == "fish"),
+             color = pal_fish,
+             shape = 16, size = 2) + 
+  #shape = "|", size = 7) +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  scale_linetype_manual(values = c("dashed", "solid", "dotted")) +
+  guides(linetype = F) +
+  coord_cartesian(xlim = c(2, 65), expand = c(0,1)) +
+  labs(x = "Age", y = "Survival probability")
+f1b
+```
+
+If fitness is simply body mass x survival probability, then we can calculate it for different transmission times.
+
+```{r}
+gc_cop_fit <- gc_cop%>%
+  filter(Day < 21)%>%
+  select(Day_cop = Day, 
+         Surv_cop = Surv,
+         Size_mg_cop = Size_mg, 
+         log_size_mg_cop = log_size_mg)%>%
+  mutate(Surv_cop_hi = exp(-0.01*Day_cop),
+         Surv_cop_lo = exp(-0.1*Day_cop))
+
+gc_cop_fit <- gc_cop_fit%>%
+  mutate(Days_fish = 60)%>%
+  mutate(
+    Size_mg_fish = exp( avg_coef_fish["Asym"] - (avg_coef_fish["Asym"] - log_size_mg_cop) * exp(-avg_coef_fish["lrc"]*Days_fish)),
+    Surv_fish = exp(-fish_mort*Days_fish))%>%
+  mutate(age = Day_cop + Days_fish, 
+         surv_prob = Surv_cop * Surv_fish,
+         surv_prob_hi = Surv_cop_hi * Surv_fish,
+         surv_prob_lo = Surv_cop_lo * Surv_fish)%>%
+  mutate(lrs = Size_mg_fish * surv_prob,
+         lrs_hi = Size_mg_fish * surv_prob_hi,
+         lrs_lo = Size_mg_fish * surv_prob_lo)%>%
+  mutate(rel_fit = lrs/max(lrs),
+         rel_fit_hi = lrs_hi/max(lrs_hi),
+         rel_fit_lo= lrs_lo/max(lrs_lo))
+```
+```{r}
+f1c <- ggplot(gc_cop_fit%>%filter(Day_cop > 2), 
+       aes(Day_cop, rel_fit)) +
+  geom_line(size = line_size) +
+  # geom_line(aes(y = rel_fit_hi)) +
+  # geom_line(aes(y = rel_fit_lo)) +
+  geom_point(
+    data = gc_cop_fit%>%filter(Day_cop %in% c(4, 11, 18)),
+    color = pal_fish,
+    shape = 16, size = 2 #shape = "|", size = 7
+  ) +
+  labs(y = "Relative fitness", x = "Days in copepods") +
+  scale_x_continuous(limits = c(3,20), expand = c(0,0))
+f1c
+```
+
+```{r}
+f1_out <- cowplot::plot_grid(
+  f1a + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")), 
+  f1b + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
+  f1c + theme(plot.margin = margin(5.5, 5.5, 5.5, 0, "pt")),
+  nrow = 1,
+  labels = c("A", "B", "C"))
+```
+
+
+```{r}
+# ggsave(f1_out, filename = "../figs/fig1_theory.png", width = 180, height = 60, units = "mm")
+# ggsave(f1_out, filename = "../figs/fig1_theory.svg", width = 180, height = 60, units = "mm")
+```
+
+
+```{r}
+# ggplot(gc_cop_fit%>%filter(Day_cop > 2), 
+#        aes(Day_cop, lrs)) +
+#   geom_line() +
+#   geom_line(aes(y = lrs_hi)) +
+#   geom_line(aes(y = lrs_lo)) +
+#   geom_point()
+```
+
