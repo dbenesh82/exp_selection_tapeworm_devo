@@ -6,7 +6,7 @@ Some parasite strategies are puzzling. For instance, parasitic worms with comple
 
 # Results
 
-The response to selection over time was analysed [here](analyses/02testing_selection_response.Rmd). Faster parasite development evolved and enabled earlier infectivity to the next host, sticklebacks.
+The response to selection over time was analysed [here](analyses/02testing_selection_response.md). Faster parasite development evolved and enabled earlier infectivity to the next host, sticklebacks.
 
 ![](figs/fig3_response_edit.png)
 
