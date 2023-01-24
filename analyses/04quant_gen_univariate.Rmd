@@ -4471,7 +4471,7 @@ ggplot(m_vc_fgrow2%>%
 ## Fecundity 
 
 ```{r}
-dat_bred <- dat_bred%>%mutate(log_eggs = log(eggnum_d2_6_indiv))
+dat_bred <- dat_bred%>%mutate(log_eggs = log(eggnum_d2_7_indiv))
 ```
 
 Here are the number of full-sib families and the number of offspring phenotyped per family.
@@ -5009,8 +5009,8 @@ px_modcomps
 ```
 
 ```{r}
-ggsave(px_modcomps, filename = "../figs/figS_modcomps.png", width = 90*2, height = 60*2, units = "mm")
-ggsave(px_modcomps, filename = "../figs/figS_modcomps.svg", width = 90*2, height = 60*2, units = "mm")
+# ggsave(px_modcomps, filename = "../figs/figS_modcomps.png", width = 90*2, height = 60*2, units = "mm")
+# ggsave(px_modcomps, filename = "../figs/figS_modcomps.svg", width = 90*2, height = 60*2, units = "mm")
 ```
 
 Here are the models and traits where *starting conditions* explained essentially no variation (i.e. the 95% CI includes zero < 0.5%).
@@ -5234,7 +5234,7 @@ px_skew
 ```
 
 ```{r}
-ggsave(px_skew, filename = "../figs/figS_skew.png", width = 40*4, height = 40*3, units = "mm")
+# ggsave(px_skew, filename = "../figs/figS_skew.png", width = 40*4, height = 40*3, units = "mm")
 ```
 
 The family averages include families from all three lines. Let's examine skewness in those distributions separately.
@@ -5441,13 +5441,13 @@ px_skew2 <- cowplot::plot_grid(
   align = "h"
 )
 # px_skew2
-ggsave(px_skew2, filename = "../figs/figS_skew_byline.png", width = 80*4, height = 40*3, units = "mm")
+# ggsave(px_skew2, filename = "../figs/figS_skew_byline.png", width = 80*4, height = 40*3, units = "mm")
 ```
 
 So, these trends are consistent with the idea that directional selection on larval developmental rate releases cryptic genetic variation and that most of this variation is detrimental.
 
 ```{r}
-save.image(file = "04quant_gen_univariate.RData")
+# save.image(file = "04quant_gen_univariate.RData")
 ```
 
 ```{r}
