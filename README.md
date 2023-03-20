@@ -20,4 +20,4 @@ I speculate that, on longer time scales, the ultimate cost of abbreviated develo
 
 # Reference
 
-Benesh, D.P. 2023. Selection on an extreme-yet-conserved larval life-history strategy in a tapeworm. Evolution. In revision.
+Benesh, D.P. 2023. Selection on an extreme-yet-conserved larval life-history strategy in a tapeworm. Evolution. [https://doi.org/10.1093/evolut/qpad034](https://doi.org/10.1093/evolut/qpad034).
